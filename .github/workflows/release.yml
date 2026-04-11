@@ -1,0 +1,124 @@
+name: Auto Release (godot-fetch)
+
+on:
+  workflow_run:
+    workflows:
+      - CI
+    types:
+      - completed
+
+jobs:
+  release:
+    if: ${{ github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == 'main' }}
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+      id-token: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          fetch-depth: 0
+
+      - name: Detect godot-fetch release-scope changes
+        id: detect_changes
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          last_tag="$(git tag --list 'godot-fetch@*' --sort=-v:refname | head -n1)"
+          if [[ -n "$last_tag" ]]; then
+            changed_files="$(git diff --name-only "${last_tag}..HEAD")"
+          else
+            changed_files="$(git ls-files)"
+          fi
+
+          root_changes="$(printf '%s\n' "$changed_files" | grep -E -v '^$|^packages/cookies-sqlite/' || true)"
+          if [[ -n "$root_changes" ]]; then
+            echo "release_needed=true" >> "$GITHUB_OUTPUT"
+            echo "Detected godot-fetch release-scope changes."
+          else
+            echo "release_needed=false" >> "$GITHUB_OUTPUT"
+            echo "No godot-fetch release-scope changes since last scoped tag."
+          fi
+
+      - name: Setup Node.js
+        if: ${{ steps.detect_changes.outputs.release_needed == 'true' }}
+        uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          package-manager-cache: false
+
+      - name: Setup pnpm
+        if: ${{ steps.detect_changes.outputs.release_needed == 'true' }}
+        uses: pnpm/action-setup@v5
+        with:
+          version: 10.23.0
+          run_install: false
+
+      - name: Get pnpm store path
+        if: ${{ steps.detect_changes.outputs.release_needed == 'true' }}
+        run: echo "STORE_PATH=$(pnpm store path --silent)" >> "$GITHUB_ENV"
+
+      - name: Cache pnpm store
+        if: ${{ steps.detect_changes.outputs.release_needed == 'true' }}
+        uses: actions/cache@v5
+        with:
+          path: ${{ env.STORE_PATH }}
+          key: ${{ runner.os }}-pnpm-store-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-pnpm-store-
+
+      - name: Install dependencies
+        if: ${{ steps.detect_changes.outputs.release_needed == 'true' }}
+        run: pnpm install --frozen-lockfile
+
+      - name: Setup GodotJS Toolchain
+        if: ${{ steps.detect_changes.outputs.release_needed == 'true' }}
+        env:
+          GODOTJS_RELEASE_TAG: v1.1.0.beta1-4.6.1
+          GODOTJS_EDITOR_ARCHIVE_URL: https://github.com/godotjs/GodotJS/releases/download/v1.1.0.beta1-4.6.1/linux-editor-4.6.1-v8.zip
+          GODOTJS_EDITOR_ARCHIVE_SHA256: 6dd3aa8f27210111052038b35c092f804f8218405ca50edf70a0a83864e38375
+          GODOTJS_TEMPLATE_DEBUG_ARCHIVE_URL: https://github.com/godotjs/GodotJS/releases/download/v1.1.0.beta1-4.6.1/web-dlink-template_debug-4.6.1-browser.zip
+          GODOTJS_TEMPLATE_DEBUG_ARCHIVE_SHA256: be70a392ea31060c48a891e2907816470c057c3ce9d1eca54a2ad9621651ed94
+          GODOTJS_TEMPLATE_RELEASE_ARCHIVE_URL: https://github.com/godotjs/GodotJS/releases/download/v1.1.0.beta1-4.6.1/web-dlink-template_release-4.6.1-browser.zip
+          GODOTJS_TEMPLATE_RELEASE_ARCHIVE_SHA256: 5b2228b7d4a0a912fb4791db6d46bf03dabb1ac4b8127168df97c6e831f9b0b0
+          GODOT_EXPORT_TEMPLATES_VERSION: 4.6.1.stable
+        run: bash tests/ci/setup-godotjs.sh
+
+      - name: Show Godot Version
+        if: ${{ steps.detect_changes.outputs.release_needed == 'true' }}
+        run: '"$GODOT" --version'
+
+      - name: Lint
+        if: ${{ steps.detect_changes.outputs.release_needed == 'true' }}
+        run: pnpm lint
+
+      - name: Build
+        if: ${{ steps.detect_changes.outputs.release_needed == 'true' }}
+        run: pnpm build
+
+      - name: Package Release Assets
+        if: ${{ steps.detect_changes.outputs.release_needed == 'true' }}
+        run: |
+          mkdir -p release/godot-fetch
+          pnpm pack --pack-destination release/godot-fetch
+          ls -lah release/godot-fetch
+
+      - name: Auto Release
+        id: auto_release
+        if: ${{ steps.detect_changes.outputs.release_needed == 'true' }}
+        run: node scripts/run-auto-release.mts --tag-prefix "godot-fetch@" --target-sha "${{ github.event.workflow_run.head_sha }}" --github-output "${GITHUB_OUTPUT}"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish to npm (Trusted Publishing)
+        if: ${{ steps.detect_changes.outputs.release_needed == 'true' && steps.auto_release.outputs.release_created == 'true' }}
+        run: |
+          package_tgz="$(ls release/godot-fetch/*.tgz | head -n1)"
+          npm publish --provenance --access public "$package_tgz"

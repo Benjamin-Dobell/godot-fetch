@@ -1,0 +1,4 @@
+.godot/
+node_modules/
+wpt-cache/
+!wpt-cache/.gdignore

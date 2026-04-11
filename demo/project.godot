@@ -1,0 +1,40 @@
+; Engine configuration file.
+; It's best edited using the editor UI and not directly,
+; since the parameters that go here are not all obvious.
+;
+; Format:
+;   [section] ; section goes between []
+;   param=value ; assign values to parameters
+
+config_version=5
+
+[animation]
+
+compatibility/default_parent_skeleton_in_mesh_instance_3d=true
+
+[application]
+
+config/name="Godot Fetch Demo / Test Suite"
+run/main_scene=""
+config/features=PackedStringArray("4.7")
+run/main_scene.wpt_polyfill="res://FetchRunnerPolyfill.tscn"
+run/main_scene.wpt_browser="res://WptRunnerBrowser.tscn"
+run/main_scene.http_poll_regression="res://HttpPollRegressionRunner.tscn"
+
+[debug]
+
+settings/stdout/verbose_stdout=true
+
+[editor_plugins]
+
+enabled=PackedStringArray("res://addons/wpt_cache_export/plugin.cfg", "res://addons/godot-sqlite/plugin.cfg")
+
+[GodotJS]
+
+runtime/debugger/debugger_port=9249
+
+[rendering]
+
+textures/vram_compression/import_etc2_astc=true
+quality/driver/driver_name="GLES2"
+vram_compression/import_etc=true
