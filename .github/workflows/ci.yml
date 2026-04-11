@@ -1,0 +1,414 @@
+name: CI
+permissions:
+  contents: write
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      run_web_wpt:
+        description: 'Run Web Browser WPT suite'
+        required: true
+        default: false
+        type: boolean
+
+jobs:
+  checks:
+    name: Build, Lint, Host Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      WPT_HOST: web-platform.test
+      WPT_DOMAIN_WWW: www.web-platform.test
+      WPT_DOMAIN_WWW2: www2.web-platform.test
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          submodules: recursive
+
+      - name: Setup Node
+        uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          package-manager-cache: false
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.23.0
+          run_install: false
+
+      - name: Get pnpm store path
+        run: echo "STORE_PATH=$(pnpm store path --silent)" >> "$GITHUB_ENV"
+
+      - name: Cache pnpm store
+        uses: actions/cache@v5
+        with:
+          path: ${{ env.STORE_PATH }}
+          key: ${{ runner.os }}-pnpm-store-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-pnpm-store-
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Setup GodotJS Toolchain
+        env:
+          GODOTJS_RELEASE_TAG: v1.1.0.beta1-4.6.1
+          GODOTJS_EDITOR_ARCHIVE_URL: https://github.com/godotjs/GodotJS/releases/download/v1.1.0.beta1-4.6.1/linux-editor-4.6.1-v8.zip
+          GODOTJS_EDITOR_ARCHIVE_SHA256: 6dd3aa8f27210111052038b35c092f804f8218405ca50edf70a0a83864e38375
+          GODOTJS_TEMPLATE_DEBUG_ARCHIVE_URL: https://github.com/godotjs/GodotJS/releases/download/v1.1.0.beta1-4.6.1/web-dlink-template_debug-4.6.1-browser.zip
+          GODOTJS_TEMPLATE_DEBUG_ARCHIVE_SHA256: be70a392ea31060c48a891e2907816470c057c3ce9d1eca54a2ad9621651ed94
+          GODOTJS_TEMPLATE_RELEASE_ARCHIVE_URL: https://github.com/godotjs/GodotJS/releases/download/v1.1.0.beta1-4.6.1/web-dlink-template_release-4.6.1-browser.zip
+          GODOTJS_TEMPLATE_RELEASE_ARCHIVE_SHA256: 5b2228b7d4a0a912fb4791db6d46bf03dabb1ac4b8127168df97c6e831f9b0b0
+          GODOT_EXPORT_TEMPLATES_VERSION: 4.6.1.stable
+        run: bash tests/ci/setup-godotjs.sh
+
+      - name: Show Godot Version
+        run: |
+          "$GODOT" --version
+
+      - name: Ensure WPT hosts mapping
+        run: |
+          python3 tests/wpt-upstream/wpt.py make-hosts-file > /tmp/wpt-hosts.txt
+          python3 - <<'PY'
+          from pathlib import Path
+          import subprocess
+
+          hosts_path = Path("/etc/hosts")
+          generated = Path("/tmp/wpt-hosts.txt").read_text(encoding="utf-8").splitlines()
+          existing = hosts_path.read_text(encoding="utf-8").splitlines()
+          existing_set = {line.strip() for line in existing if line.strip()}
+          missing = [line for line in generated if line.strip() and line.strip() not in existing_set]
+          if not missing:
+              print("WPT hosts mapping already present")
+          else:
+              payload = "\n".join(missing) + "\n"
+              subprocess.run(
+                  ["sudo", "tee", "-a", str(hosts_path)],
+                  input=payload.encode("utf-8"),
+                  check=True,
+              )
+              print(f"Added {len(missing)} WPT host mappings")
+          PY
+
+      - name: Verify WPT hosts mapping
+        run: |
+          python3 - <<'PY'
+          import socket, sys
+          required = ["web-platform.test", "www.web-platform.test", "www2.web-platform.test", "not-web-platform.test"]
+          missing = []
+          for host in required:
+              try:
+                  ip = socket.gethostbyname(host)
+              except Exception:
+                  missing.append(host)
+                  continue
+              if ip != "127.0.0.1":
+                  missing.append(f"{host} -> {ip}")
+          if missing:
+              print("Missing/invalid hosts mapping:", ", ".join(missing))
+              print("Run: python3 tests/wpt-upstream/wpt.py make-hosts-file and apply entries to hosts")
+              sys.exit(1)
+          PY
+
+      - name: Build
+        run: pnpm build
+
+      - name: Build Demo Scripts
+        run: pnpm -C demo run build
+
+      - name: Lint
+        run: pnpm lint
+
+      - name: Host Smoke Tests
+        run: |
+          pnpm -C demo run test:http
+          pnpm -C demo run test:stream
+          pnpm -C demo run test:bridge
+
+      - name: Cookie Store Persistence Tests
+        run: |
+          pnpm -C demo run test:cookies
+
+      - name: WPT Host Conformant
+        id: wpt_host_conformant
+        run: |
+          set -euo pipefail
+          GODOT_FETCH_MODE=conformant pnpm -C demo run test:fetch:wpt:host | tee /tmp/wpt-host-conformant.log
+          node - <<'NODE'
+          const { appendFileSync, readFileSync } = require('node:fs');
+
+          const outputPath = process.env.GITHUB_OUTPUT;
+          const logText = readFileSync('/tmp/wpt-host-conformant.log', 'utf8');
+          const summaryLine = logText
+            .split(/\r?\n/)
+            .filter((line) => line.includes('[WPT_RUNNER_SUMMARY]'))
+            .at(-1);
+
+          if (!summaryLine) {
+            throw new Error('Missing [WPT_RUNNER_SUMMARY] marker in host conformant output');
+          }
+
+          const marker = '[WPT_RUNNER_SUMMARY]';
+          const jsonText = summaryLine.slice(summaryLine.indexOf(marker) + marker.length).trim();
+          const summary = JSON.parse(jsonText);
+          appendFileSync(outputPath, `host_wpt_pass_rate=${String(summary.passRatePercent)}\n`, 'utf8');
+          NODE
+
+      - name: Assert Host WPT No Regression
+        run: pnpm exec node tests/ci/assert-host-wpt-no-regression.ts "${{ steps.wpt_host_conformant.outputs.host_wpt_pass_rate }}"
+
+      - name: WPT Host Fast
+        run: GODOT_FETCH_MODE=fast pnpm -C demo run test:fetch:wpt:host
+
+      - name: Generate Host WPT Badge
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        run: pnpm exec node tests/ci/generate-host-wpt-badge.ts "${{ steps.wpt_host_conformant.outputs.host_wpt_pass_rate }}"
+
+      - name: Commit Host WPT Badge
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        run: |
+          if git diff --quiet -- .github/badges/wpt-host-pass-rate.svg; then
+            echo "Host WPT badge unchanged"
+            exit 0
+          fi
+          git config user.name "godot-fetch-ci"
+          git config user.email "godot-fetch-ci@users.noreply.github.com"
+          git add .github/badges/wpt-host-pass-rate.svg
+          git commit -m "ci: update host WPT badge [skip ci]"
+          git push
+
+  web-smoke:
+    name: Web Smoke Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    needs: checks
+    env:
+      WPT_HOST: web-platform.test
+      WPT_DOMAIN_WWW: www.web-platform.test
+      WPT_DOMAIN_WWW2: www2.web-platform.test
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          submodules: recursive
+
+      - name: Setup Node
+        uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          package-manager-cache: false
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.23.0
+          run_install: false
+
+      - name: Get pnpm store path
+        run: echo "STORE_PATH=$(pnpm store path --silent)" >> "$GITHUB_ENV"
+
+      - name: Cache pnpm store
+        uses: actions/cache@v5
+        with:
+          path: ${{ env.STORE_PATH }}
+          key: ${{ runner.os }}-pnpm-store-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-pnpm-store-
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Setup GodotJS Toolchain
+        env:
+          GODOTJS_RELEASE_TAG: v1.1.0.beta1-4.6.1
+          GODOTJS_EDITOR_ARCHIVE_URL: https://github.com/godotjs/GodotJS/releases/download/v1.1.0.beta1-4.6.1/linux-editor-4.6.1-v8.zip
+          GODOTJS_EDITOR_ARCHIVE_SHA256: 6dd3aa8f27210111052038b35c092f804f8218405ca50edf70a0a83864e38375
+          GODOTJS_TEMPLATE_DEBUG_ARCHIVE_URL: https://github.com/godotjs/GodotJS/releases/download/v1.1.0.beta1-4.6.1/web-dlink-template_debug-4.6.1-browser.zip
+          GODOTJS_TEMPLATE_DEBUG_ARCHIVE_SHA256: be70a392ea31060c48a891e2907816470c057c3ce9d1eca54a2ad9621651ed94
+          GODOTJS_TEMPLATE_RELEASE_ARCHIVE_URL: https://github.com/godotjs/GodotJS/releases/download/v1.1.0.beta1-4.6.1/web-dlink-template_release-4.6.1-browser.zip
+          GODOTJS_TEMPLATE_RELEASE_ARCHIVE_SHA256: 5b2228b7d4a0a912fb4791db6d46bf03dabb1ac4b8127168df97c6e831f9b0b0
+          GODOT_EXPORT_TEMPLATES_VERSION: 4.6.1.stable
+        run: bash tests/ci/setup-godotjs.sh
+
+      - name: Show Godot Version
+        run: |
+          "$GODOT" --version
+
+      - name: Ensure WPT hosts mapping
+        run: |
+          python3 tests/wpt-upstream/wpt.py make-hosts-file > /tmp/wpt-hosts.txt
+          python3 - <<'PY'
+          from pathlib import Path
+          import subprocess
+
+          hosts_path = Path("/etc/hosts")
+          generated = Path("/tmp/wpt-hosts.txt").read_text(encoding="utf-8").splitlines()
+          existing = hosts_path.read_text(encoding="utf-8").splitlines()
+          existing_set = {line.strip() for line in existing if line.strip()}
+          missing = [line for line in generated if line.strip() and line.strip() not in existing_set]
+          if not missing:
+              print("WPT hosts mapping already present")
+          else:
+              payload = "\n".join(missing) + "\n"
+              subprocess.run(
+                  ["sudo", "tee", "-a", str(hosts_path)],
+                  input=payload.encode("utf-8"),
+                  check=True,
+              )
+              print(f"Added {len(missing)} WPT host mappings")
+          PY
+
+      - name: Verify WPT hosts mapping
+        run: |
+          python3 - <<'PY'
+          import socket, sys
+          required = ["web-platform.test", "www.web-platform.test", "www2.web-platform.test", "not-web-platform.test"]
+          missing = []
+          for host in required:
+              try:
+                  ip = socket.gethostbyname(host)
+              except Exception:
+                  missing.append(host)
+                  continue
+              if ip != "127.0.0.1":
+                  missing.append(f"{host} -> {ip}")
+          if missing:
+              print("Missing/invalid hosts mapping:", ", ".join(missing))
+              sys.exit(1)
+          PY
+
+      - name: Build
+        run: pnpm build
+
+      - name: Build Demo Scripts
+        run: pnpm -C demo run build
+
+      - name: Install Chrome For Puppeteer
+        run: pnpm exec puppeteer browsers install chrome
+
+      - name: Web Smoke Tests
+        run: |
+          pnpm -C demo run test:http:web
+          pnpm -C demo run test:stream:web
+          pnpm -C demo run test:bridge:web
+
+  web-browser-wpt:
+    name: Web Browser WPT
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_web_wpt == true }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    needs: [checks, web-smoke]
+    env:
+      WPT_HOST: web-platform.test
+      WPT_DOMAIN_WWW: www.web-platform.test
+      WPT_DOMAIN_WWW2: www2.web-platform.test
+      WPT_WEB_FETCH_IMPLEMENTATION: browser
+      GODOT_FETCH_MODE: conformant
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          submodules: recursive
+
+      - name: Setup Node
+        uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          package-manager-cache: false
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.23.0
+          run_install: false
+
+      - name: Get pnpm store path
+        run: echo "STORE_PATH=$(pnpm store path --silent)" >> "$GITHUB_ENV"
+
+      - name: Cache pnpm store
+        uses: actions/cache@v5
+        with:
+          path: ${{ env.STORE_PATH }}
+          key: ${{ runner.os }}-pnpm-store-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-pnpm-store-
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Setup GodotJS Toolchain
+        env:
+          GODOTJS_RELEASE_TAG: v1.1.0.beta1-4.6.1
+          GODOTJS_EDITOR_ARCHIVE_URL: https://github.com/godotjs/GodotJS/releases/download/v1.1.0.beta1-4.6.1/linux-editor-4.6.1-v8.zip
+          GODOTJS_EDITOR_ARCHIVE_SHA256: 6dd3aa8f27210111052038b35c092f804f8218405ca50edf70a0a83864e38375
+          GODOTJS_TEMPLATE_DEBUG_ARCHIVE_URL: https://github.com/godotjs/GodotJS/releases/download/v1.1.0.beta1-4.6.1/web-dlink-template_debug-4.6.1-browser.zip
+          GODOTJS_TEMPLATE_DEBUG_ARCHIVE_SHA256: be70a392ea31060c48a891e2907816470c057c3ce9d1eca54a2ad9621651ed94
+          GODOTJS_TEMPLATE_RELEASE_ARCHIVE_URL: https://github.com/godotjs/GodotJS/releases/download/v1.1.0.beta1-4.6.1/web-dlink-template_release-4.6.1-browser.zip
+          GODOTJS_TEMPLATE_RELEASE_ARCHIVE_SHA256: 5b2228b7d4a0a912fb4791db6d46bf03dabb1ac4b8127168df97c6e831f9b0b0
+          GODOT_EXPORT_TEMPLATES_VERSION: 4.6.1.stable
+        run: bash tests/ci/setup-godotjs.sh
+
+      - name: Show Godot Version
+        run: |
+          "$GODOT" --version
+
+      - name: Ensure WPT hosts mapping
+        run: |
+          python3 tests/wpt-upstream/wpt.py make-hosts-file > /tmp/wpt-hosts.txt
+          python3 - <<'PY'
+          from pathlib import Path
+          import subprocess
+
+          hosts_path = Path("/etc/hosts")
+          generated = Path("/tmp/wpt-hosts.txt").read_text(encoding="utf-8").splitlines()
+          existing = hosts_path.read_text(encoding="utf-8").splitlines()
+          existing_set = {line.strip() for line in existing if line.strip()}
+          missing = [line for line in generated if line.strip() and line.strip() not in existing_set]
+          if not missing:
+              print("WPT hosts mapping already present")
+          else:
+              payload = "\n".join(missing) + "\n"
+              subprocess.run(
+                  ["sudo", "tee", "-a", str(hosts_path)],
+                  input=payload.encode("utf-8"),
+                  check=True,
+              )
+              print(f"Added {len(missing)} WPT host mappings")
+          PY
+
+      - name: Verify WPT hosts mapping
+        run: |
+          python3 - <<'PY'
+          import socket, sys
+          required = ["web-platform.test", "www.web-platform.test", "www2.web-platform.test", "not-web-platform.test"]
+          missing = []
+          for host in required:
+              try:
+                  ip = socket.gethostbyname(host)
+              except Exception:
+                  missing.append(host)
+                  continue
+              if ip != "127.0.0.1":
+                  missing.append(f"{host} -> {ip}")
+          if missing:
+              print("Missing/invalid hosts mapping:", ", ".join(missing))
+              sys.exit(1)
+          PY
+
+      - name: Build
+        run: pnpm build
+
+      - name: Build Demo Scripts
+        run: pnpm -C demo run build
+
+      - name: Install Chrome For Puppeteer
+        run: pnpm exec puppeteer browsers install chrome
+
+      - name: WPT Web Browser
+        run: pnpm -C demo run test:fetch:wpt:web:browser

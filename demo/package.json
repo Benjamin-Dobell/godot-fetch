@@ -1,0 +1,39 @@
+{
+  "name": "godot-fetch-demo",
+  "private": true,
+  "packageManager": "pnpm@10.23.0",
+  "dependencies": {
+    "@godot-fetch/cookies-sqlite": "workspace:*",
+    "godot-fetch": "workspace:*",
+    "godot-sqlite-kysely": "^1.0.0"
+  },
+  "devDependencies": {
+    "@typescript/native-preview": "7.0.0-dev.20260312.1",
+    "typescript": "^5.9.3",
+    "wpt-compliance": "^1.0.3"
+  },
+  "scripts": {
+    "build": "tsgo --build",
+    "build:cookies-sqlite": "pnpm -C ../packages/cookies-sqlite run build",
+    "sync:wpt:cache": "node ../tests/sync-wpt-cache.ts",
+    "test:fetch:wpt": "pnpm run test:fetch:wpt:host",
+    "test:fetch:wpt:conformant": "GODOT_FETCH_MODE=conformant pnpm run test:fetch:wpt:host",
+    "test:fetch:wpt:fast": "GODOT_FETCH_MODE=fast pnpm run test:fetch:wpt:host",
+    "test:fetch:wpt:matrix": "pnpm run test:fetch:wpt:conformant && pnpm run test:fetch:wpt:fast",
+    "test:web:basic": "pnpm run test:http:web && pnpm run test:stream:web && pnpm run test:bridge:web && pnpm run test:http:poll:web",
+    "test:fetch:wpt:report": "node ../tests/test-fetch-wpt-report.mts",
+    "test:fetch:wpt:host": "node ../tests/test-fetch-wpt.mts",
+    "test:fetch:wpt:web": "pnpm run test:fetch:wpt:web:browser",
+    "test:fetch:wpt:web:browser": "WPT_WEB_FETCH_IMPLEMENTATION=browser node ../tests/test-fetch-wpt-web.mts",
+    "test:cookies": "pnpm run build:cookies-sqlite && pnpm run build && node ../tests/test-cookies.mts",
+    "test:http": "node ../tests/test-http.mts",
+    "test:stream": "node ../tests/test-streaming.mts",
+    "test:http:web": "node ../tests/test-web-basic.mts http",
+    "test:stream:web": "node ../tests/test-web-basic.mts stream",
+    "test:http:poll:web": "node ../tests/test-web-basic.mts http-poll",
+    "test:bridge": "node ../tests/test-bridge.mts",
+    "test:bridge:web": "node ../tests/test-web-basic.mts bridge",
+    "watch": "tsgo -w",
+    "test:types": "tsgo --noEmit"
+  }
+}

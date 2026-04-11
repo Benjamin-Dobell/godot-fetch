@@ -1,0 +1,14 @@
+.DS_Store
+.idea/
+*.iml
+dist/
+node_modules/
+/release/
+/tests/.wpt-serve.config.json
+/types/
+/demo/wpt-cache/
+/demo/gen/
+/demo/typings/
+/demo/tests/reports/
+/tests/reports/
+/.types-staging-*/

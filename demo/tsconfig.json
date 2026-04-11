@@ -1,0 +1,56 @@
+{
+  "compilerOptions": {
+    "incremental": false,
+    "tsBuildInfoFile": ".godot/.tsbuildinfo",
+    "target": "es2022",
+    "lib": [
+      "esnext"
+    ],
+    "module": "node16",
+    "moduleResolution": "node16",
+    "preserveSymlinks": true,
+    "rootDir": "./",
+    "typeRoots": [
+      "./node_modules/@types",
+      "./typings"
+    ],
+    "types": [],
+    "sourceMap": true,
+    "outDir": ".godot/GodotJS",
+    "sourceRoot": "../../",
+    "newLine": "crlf",
+    "noEmitOnError": false,
+    "esModuleInterop": true,
+    "forceConsistentCasingInFileNames": true,
+    "strict": true,
+    "noImplicitAny": true,
+    "strictNullChecks": true,
+    "strictFunctionTypes": true,
+    "strictBindCallApply": true,
+    "strictPropertyInitialization": true,
+    "noImplicitThis": true,
+    "alwaysStrict": true,
+    "exactOptionalPropertyTypes": true,
+    "noImplicitReturns": false,
+    "noUncheckedIndexedAccess": true,
+    "noImplicitOverride": true,
+    "skipLibCheck": true
+  },
+  "include": [
+    "./**/*.ts",
+    "./scripts/**/*.d.ts",
+    "./typings/**/*.d.ts"
+  ],
+  "exclude": [
+    "./node_modules/**",
+    "./.godot/**",
+    "./build/**",
+    "./data/**",
+    "./scripts/preflight-extensions.ts",
+    "./scripts/test-http.ts",
+    "./scripts/test-streaming.ts",
+    "./scripts/test-fetch-wpt.ts",
+    "./scripts/test-fetch-wpt-web.ts",
+    "./scripts/wpt/fetch-preload.ts"
+  ]
+}

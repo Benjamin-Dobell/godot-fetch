@@ -1,0 +1,70 @@
+{
+  "name": "@godot-fetch/cookies-sqlite",
+  "version": "1.0.0",
+  "description": "SQLite-backed CookieStore for godot-fetch.",
+  "main": "./dist/cjs/index.js",
+  "module": "./dist/esm/index.js",
+  "types": "./dist/types/esm/index.d.ts",
+  "exports": {
+    ".": {
+      "import": {
+        "default": "./dist/esm/index.js",
+        "types": "./dist/types/esm/index.d.ts"
+      },
+      "require": {
+        "default": "./dist/cjs/index.js",
+        "types": "./dist/types/cjs/index.d.ts"
+      }
+    },
+    "./sqlite-cookie-store.worker": {
+      "import": {
+        "default": "./dist/esm/sqlite-cookie-store.worker.js",
+        "types": "./dist/types/esm/sqlite-cookie-store.worker.d.ts"
+      },
+      "require": {
+        "default": "./dist/cjs/sqlite-cookie-store.worker.js",
+        "types": "./dist/types/cjs/sqlite-cookie-store.worker.d.ts"
+      }
+    }
+  },
+  "files": [
+    "dist",
+    "!dist/**/*.tsbuildinfo"
+  ],
+  "scripts": {
+    "build": "tsc --build && node ./scripts/post-build.mts"
+  },
+  "dependencies": {
+    "godot-fetch": "workspace:*",
+    "godot-sqlite-kysely": "^1.0.0",
+    "kysely": "^0.28.14"
+  },
+  "publishConfig": {
+    "registry": "https://registry.npmjs.org/",
+    "access": "public",
+    "provenance": true
+  },
+  "auto": {
+    "baseBranch": "main",
+    "noVersionPrefix": true,
+    "plugins": [
+      [
+        "conventional-commits",
+        {
+          "preset": "angular"
+        }
+      ],
+      "git-tag",
+      [
+        "upload-assets",
+        {
+          "assets": [
+            "../../release/cookies-sqlite/*.tgz"
+          ]
+        }
+      ]
+    ]
+  },
+  "license": "MIT",
+  "author": "Breaka Club"
+}

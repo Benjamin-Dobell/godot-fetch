@@ -1,0 +1,6 @@
+[gd_scene format=3 uid="uid://dxfyj3m2wfw6n"]
+
+[ext_resource type="Script" path="res://scripts/wpt/fetch-wpt-runner-browser-node.ts" id="1_7w6qn"]
+
+[node name="WptRunnerBrowser" type="Node"]
+script = ExtResource("1_7w6qn")
