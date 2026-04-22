@@ -112,7 +112,9 @@ function main(): void {
   const tagPrefix = getArgValue(args, '--tag-prefix');
   const targetSha = getArgValue(args, '--target-sha') ?? 'HEAD';
   const baseBranch = getArgValue(args, '--base-branch') ?? 'main';
+  const expectedVersion = getArgValue(args, '--expected-version');
   const githubOutputPath = getArgValue(args, '--github-output');
+  const isPlanOnly = hasFlag(args, '--plan-only');
   const isDryRun = hasFlag(args, '--dry-run');
 
   if (!tagPrefix) {
@@ -159,10 +161,26 @@ function main(): void {
   const nextVersion = incrementSemver(currentVersion, bumpToken);
   const nextTag = `${tagPrefix}${nextVersion}`;
 
+  if (expectedVersion && expectedVersion !== nextVersion) {
+    throw new Error(
+      `Expected computed version ${expectedVersion} but release calculation produced ${nextVersion}`,
+    );
+  }
+
   if (tagExists(nextTag)) {
     console.log(`Tag ${nextTag} already exists; skipping release.`);
     writeGithubOutputs(githubOutputPath, {
       release_created: 'false',
+      release_tag: nextTag,
+      release_version: nextVersion,
+    });
+    return;
+  }
+
+  if (isPlanOnly) {
+    console.log(`Planned release ${nextTag} from ${fromRef} to ${targetSha}.`);
+    writeGithubOutputs(githubOutputPath, {
+      release_created: 'true',
       release_tag: nextTag,
       release_version: nextVersion,
     });

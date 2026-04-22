@@ -91,34 +91,47 @@ jobs:
           GODOT_EXPORT_TEMPLATES_VERSION: 4.6.1.stable
         run: bash tests/ci/setup-godotjs.sh
 
-      - name: Show Godot Version
+      - name: Plan Release
+        id: release_plan
         if: ${{ steps.detect_changes.outputs.release_needed == 'true' }}
+        run: node scripts/run-auto-release.mts --plan-only --tag-prefix "godot-fetch@" --target-sha "${{ github.event.workflow_run.head_sha }}" --github-output "${GITHUB_OUTPUT}"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set package version for release
+        if: ${{ steps.detect_changes.outputs.release_needed == 'true' && steps.release_plan.outputs.release_created == 'true' }}
+        run: npm pkg set version="${{ steps.release_plan.outputs.release_version }}"
+
+      - name: Show Godot Version
+        if: ${{ steps.detect_changes.outputs.release_needed == 'true' && steps.release_plan.outputs.release_created == 'true' }}
         run: '"$GODOT" --version'
 
       - name: Lint
-        if: ${{ steps.detect_changes.outputs.release_needed == 'true' }}
+        if: ${{ steps.detect_changes.outputs.release_needed == 'true' && steps.release_plan.outputs.release_created == 'true' }}
         run: pnpm lint
 
       - name: Build
-        if: ${{ steps.detect_changes.outputs.release_needed == 'true' }}
+        if: ${{ steps.detect_changes.outputs.release_needed == 'true' && steps.release_plan.outputs.release_created == 'true' }}
         run: pnpm build
 
       - name: Package Release Assets
-        if: ${{ steps.detect_changes.outputs.release_needed == 'true' }}
+        if: ${{ steps.detect_changes.outputs.release_needed == 'true' && steps.release_plan.outputs.release_created == 'true' }}
         run: |
           mkdir -p release/godot-fetch
+          rm -f release/godot-fetch/*.tgz
           pnpm pack --pack-destination release/godot-fetch
           ls -lah release/godot-fetch
 
       - name: Auto Release
         id: auto_release
-        if: ${{ steps.detect_changes.outputs.release_needed == 'true' }}
-        run: node scripts/run-auto-release.mts --tag-prefix "godot-fetch@" --target-sha "${{ github.event.workflow_run.head_sha }}" --github-output "${GITHUB_OUTPUT}"
+        if: ${{ steps.detect_changes.outputs.release_needed == 'true' && steps.release_plan.outputs.release_created == 'true' }}
+        run: node scripts/run-auto-release.mts --tag-prefix "godot-fetch@" --target-sha "${{ github.event.workflow_run.head_sha }}" --expected-version "${{ steps.release_plan.outputs.release_version }}" --github-output "${GITHUB_OUTPUT}"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Publish to npm (Trusted Publishing)
         if: ${{ steps.detect_changes.outputs.release_needed == 'true' && steps.auto_release.outputs.release_created == 'true' }}
         run: |
-          package_tgz="$(ls release/godot-fetch/*.tgz | head -n1)"
+          package_tgz="release/godot-fetch/godot-fetch-${{ steps.auto_release.outputs.release_version }}.tgz"
+          test -f "$package_tgz"
           npm publish --provenance --access public "$package_tgz"
