@@ -31,12 +31,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          last_tag="$(git tag --list '@godot-fetch/cookies-sqlite@*' --sort=-v:refname | head -n1)"
-          if [[ -n "$last_tag" ]]; then
-            changed_files="$(git diff --name-only "${last_tag}..HEAD")"
-          else
-            changed_files="$(git ls-files)"
-          fi
+          changed_files="$(git show --name-only --pretty='' '${{ github.event.workflow_run.head_sha }}')"
 
           package_changes="$(printf '%s\n' "$changed_files" | grep -E '^packages/cookies-sqlite/' || true)"
           if [[ -n "$package_changes" ]]; then
