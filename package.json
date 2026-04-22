@@ -1,0 +1,136 @@
+{
+  "name": "godot-fetch",
+  "version": "0.0.0",
+  "description": "Fetch API implementation for GodotJS.",
+  "files": [
+    "src",
+    "dist",
+    "!dist/configs"
+  ],
+  "scripts": {
+    "build": "pnpm gen:type:godotjs && tsgo --build",
+    "gen:type:godotjs": "node ./scripts/gen-godotjs-types.mts",
+    "sync:wpt:cache": "node ./tests/sync-wpt-cache.ts",
+    "lint": "eslint",
+    "lint:fix": "eslint --fix",
+    "test": "pnpm -C demo run test:fetch:wpt:matrix && pnpm -C demo run test:web:basic",
+    "postbuild": "node ./scripts/post-build.mts",
+    "prettier": "prettier \"src/**/*.ts\"",
+    "prettier:fix": "prettier \"src/**/*.ts\" --write",
+    "watch": "tsgo -w"
+  },
+  "exports": {
+    ".": {
+      "import": {
+        "default": "./dist/esm/index.js",
+        "types": "./dist/types/esm/index.d.ts"
+      },
+      "require": {
+        "default": "./dist/cjs/index.js",
+        "types": "./dist/types/cjs/index.d.ts"
+      }
+    },
+    "./godot": {
+      "import": {
+        "default": "./dist/esm/godot/index.js",
+        "types": "./dist/types/esm/godot/index.d.ts"
+      },
+      "require": {
+        "default": "./dist/cjs/godot/index.js",
+        "types": "./dist/types/cjs/godot/index.d.ts"
+      }
+    },
+    "./godot/global": {
+      "import": {
+        "default": "./dist/esm/godot/global/index.js",
+        "types": "./dist/types/esm/godot/global/index.d.ts"
+      },
+      "require": {
+        "default": "./dist/cjs/godot/global/index.js",
+        "types": "./dist/types/cjs/godot/global/index.d.ts"
+      }
+    },
+    "./conformance": {
+      "import": {
+        "default": "./dist/esm/conformance/index.js",
+        "types": "./dist/types/esm/conformance/index.d.ts"
+      },
+      "require": {
+        "default": "./dist/cjs/conformance/index.js",
+        "types": "./dist/types/cjs/conformance/index.d.ts"
+      }
+    },
+    "./cookies": {
+      "import": {
+        "default": "./dist/esm/cookies/index.js",
+        "types": "./dist/types/esm/cookies/index.d.ts"
+      },
+      "require": {
+        "default": "./dist/cjs/cookies/index.js",
+        "types": "./dist/types/cjs/cookies/index.d.ts"
+      }
+    },
+    "./standards": {
+      "import": {
+        "default": "./dist/esm/standards/index.js",
+        "types": "./dist/types/esm/standards/index.d.ts"
+      },
+      "require": {
+        "default": "./dist/cjs/standards/index.js",
+        "types": "./dist/types/cjs/standards/index.d.ts"
+      }
+    }
+  },
+  "license": "MIT",
+  "keywords": [
+    "godot",
+    "godotjs",
+    "fetch",
+    "http",
+    "godotjs fetch",
+    "godotjs http",
+    "godot fetch",
+    "godot http"
+  ],
+  "author": "Breaka Club",
+  "packageManager": "pnpm@10.23.0",
+  "prettier": {
+    "singleQuote": true
+  },
+  "devDependencies": {
+    "@auto-it/conventional-commits": "^11.3.6",
+    "@auto-it/git-tag": "^11.3.6",
+    "@auto-it/upload-assets": "^11.3.6",
+    "@types/node": "~24.3.3",
+    "@typescript/native-preview": "7.0.0-dev.20260411.1",
+    "@typescript/native-preview-darwin-arm64": "7.0.0-dev.20260411.1",
+    "auto": "^11.3.6",
+    "eslint": "^9.39.1",
+    "eslint-config-prettier": "10.1.8",
+    "puppeteer": "^24.40.0",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.47.0"
+  },
+  "repository": "github:BreakaClub/godot-fetch",
+  "auto": {
+    "baseBranch": "main",
+    "noVersionPrefix": true,
+    "plugins": [
+      [
+        "conventional-commits",
+        {
+          "preset": "angular"
+        }
+      ],
+      "git-tag",
+      [
+        "upload-assets",
+        {
+          "assets": [
+            "release/godot-fetch/*.tgz"
+          ]
+        }
+      ]
+    ]
+  }
+}
