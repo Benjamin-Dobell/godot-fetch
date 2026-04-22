@@ -39,6 +39,7 @@
     "godot-sqlite-kysely": "^1.0.0",
     "kysely": "^0.28.14"
   },
+  "repository": "github:BreakaClub/godot-fetch",
   "publishConfig": {
     "registry": "https://registry.npmjs.org/",
     "access": "public",
