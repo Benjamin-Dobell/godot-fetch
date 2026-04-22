@@ -1,6 +1,6 @@
 {
   "name": "godot-fetch",
-  "version": "0.0.0",
+  "version": "0.0.2",
   "description": "Fetch API implementation for GodotJS.",
   "files": [
     "src",
