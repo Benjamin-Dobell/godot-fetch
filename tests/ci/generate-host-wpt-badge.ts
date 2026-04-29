@@ -53,11 +53,10 @@ if (!Number.isFinite(parsedRate)) {
 }
 
 const passRate = Math.max(0, Math.min(100, parsedRate));
-const label = 'compliance';
+const label = 'spec compliance';
 const value = `${passRate.toFixed(1)}%`;
 const color = pickColor(passRate);
 const svg = buildBadgeSvg(label, value, color);
 const outputPath = resolve(process.cwd(), '.github/badges/wpt-host-pass-rate.svg');
 mkdirSync(dirname(outputPath), { recursive: true });
 writeFileSync(outputPath, svg, 'utf8');
-

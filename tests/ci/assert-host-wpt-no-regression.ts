@@ -2,7 +2,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
 function parseRate(text: string): null | number {
-  const ariaMatch = text.match(/aria-label="compliance:\s*([0-9]+(?:\.[0-9]+)?)%"/i);
+  const ariaMatch = text.match(/aria-label="spec compliance:\s*([0-9]+(?:\.[0-9]+)?)%"/i);
   if (ariaMatch) {
     return Number.parseFloat(ariaMatch[1]);
   }
@@ -42,4 +42,3 @@ if (currentRate < baselineRate) {
 console.log(
   `[WPT_BADGE_GUARD] no regression: current=${currentRate.toFixed(1)}% baseline=${baselineRate.toFixed(1)}%`,
 );
-
