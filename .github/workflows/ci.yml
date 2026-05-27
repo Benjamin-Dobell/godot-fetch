@@ -293,10 +293,7 @@ jobs:
         run: pnpm exec puppeteer browsers install chrome
 
       - name: Web Smoke Tests
-        run: |
-          pnpm -C demo run test:http:web
-          pnpm -C demo run test:stream:web
-          pnpm -C demo run test:bridge:web
+        run: pnpm -C demo run test:web:basic
 
   web-browser-wpt:
     name: Web Browser WPT

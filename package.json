@@ -107,14 +107,13 @@
     "@auto-it/git-tag": "^11.3.6",
     "@auto-it/upload-assets": "^11.3.6",
     "@types/node": "~24.3.3",
-    "@typescript/native-preview": "7.0.0-dev.20260411.1",
-    "@typescript/native-preview-darwin-arm64": "7.0.0-dev.20260411.1",
+    "@typescript/native-preview": "7.0.0-dev.20260523.1",
     "auto": "^11.3.6",
-    "eslint": "^9.39.1",
+    "eslint": "^9.39.4",
     "eslint-config-prettier": "10.1.8",
-    "puppeteer": "^24.40.0",
+    "puppeteer": "^24.43.1",
     "typescript": "^5.9.3",
-    "typescript-eslint": "^8.47.0"
+    "typescript-eslint": "^8.59.4"
   },
   "repository": "github:BreakaClub/godot-fetch",
   "auto": {

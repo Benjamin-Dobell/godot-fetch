@@ -31,6 +31,7 @@ type HttpResponseBody = PackedByteArray | ReadableStream;
 type HttpClientRequestOptions = {
   allowRawFallback?: boolean;
   allowUnknownLengthRawStreamFallback?: boolean;
+  onStreamingResponseTerminated?: () => void;
   streamResponse?: boolean;
 };
 
@@ -51,7 +52,8 @@ type PendingRequest = {
   skipCount: number;
 };
 
-const HttpClientPoolSize = 4;
+const HttpClientPoolSize = 16;
+const DirectStreamingMaxConcurrency = HttpClientPoolSize;
 const HttpClientHostLookahead = 4;
 const HttpClientMaxSkipCount = 3;
 const HttpConnectTimeoutMs = 30_000;
@@ -68,6 +70,7 @@ const StreamPeerTlsStatusConnected = 2;
 const InsecureTlsEnv = 'GODOT_FETCH_TLS_UNSAFE';
 const TrustedTlsCertPathEnv = 'GODOT_FETCH_TLS_CA_CERT_PATH';
 const DebugHttpClientEnv = 'GODOT_FETCH_DEBUG_HTTP_CLIENT';
+const DisableDirectStreamingBackpressureEnv = 'GODOT_FETCH_DISABLE_DIRECT_STREAM_BACKPRESSURE';
 
 type HttpMethod = HTTPClient.Method | string;
 
@@ -109,8 +112,37 @@ function getMethodEnum(method: HttpMethod): null | HTTPClient.Method {
   return method;
 }
 
+function getHttpClientStatusName(status: number): string {
+  switch (status) {
+    case HTTPClient.Status.STATUS_DISCONNECTED:
+      return 'DISCONNECTED';
+    case HTTPClient.Status.STATUS_RESOLVING:
+      return 'RESOLVING';
+    case HTTPClient.Status.STATUS_CANT_RESOLVE:
+      return 'CANT_RESOLVE';
+    case HTTPClient.Status.STATUS_CONNECTING:
+      return 'CONNECTING';
+    case HTTPClient.Status.STATUS_CANT_CONNECT:
+      return 'CANT_CONNECT';
+    case HTTPClient.Status.STATUS_CONNECTED:
+      return 'CONNECTED';
+    case HTTPClient.Status.STATUS_REQUESTING:
+      return 'REQUESTING';
+    case HTTPClient.Status.STATUS_BODY:
+      return 'BODY';
+    case HTTPClient.Status.STATUS_CONNECTION_ERROR:
+      return 'CONNECTION_ERROR';
+    case HTTPClient.Status.STATUS_TLS_HANDSHAKE_ERROR:
+      return 'TLS_HANDSHAKE_ERROR';
+    default:
+      return `UNKNOWN(${String(status)})`;
+  }
+}
+
 const pendingRequests: PendingRequest[] = [];
 const httpClientPool: HttpClientSlot[] = [];
+const pendingDirectStreamingAcquires: Array<() => void> = [];
+let activeDirectStreamingRequests = 0;
 
 const cookieRegex = /^(https?):\/\/([^:/]+)(?::\d+)?([^?#]+)/i;
 const urlRegex = /^(https?):\/\/([^:/?#]+)(?::(\d+))?([^?#]*)(\?[^#]*)?/i;
@@ -129,6 +161,8 @@ const importedIsInstanceValidType = typeof is_instance_valid;
 
 const debugHttpClient = OS.has_environment(DebugHttpClientEnv)
   && OS.get_environment(DebugHttpClientEnv) === '1';
+const disableDirectStreamingBackpressure = OS.has_environment(DisableDirectStreamingBackpressureEnv)
+  && OS.get_environment(DisableDirectStreamingBackpressureEnv) === '1';
 
 type ParsedUrl = {
   host: string;
@@ -874,7 +908,9 @@ function closeSlotClientForContext(slot: HttpClientSlot, context: string): void 
   if (typeof closeFn !== 'function') {
     throw new HttpInternalError(`HTTP client close() not callable in ${context}; ${getClientSnapshot(slot)}`);
   }
-  closeFn.call(slot.client);
+  // Invoke through the instance to avoid relying on Function.prototype.call,
+  // which may be missing on some GodotJS-bound callables.
+  slot.client.close();
   slot.connectedOrigin = null;
   slot.lastPolledProcessFrame = InitialPolledProcessFrame;
   logHttpClient(slot, `${context}:after-close`);
@@ -964,6 +1000,7 @@ async function ensureClientConnected(slot: HttpClientSlot, parsedUrl: ParsedUrl,
   }
 
   const startMs = Date.now();
+  let lastProgressLogMs = startMs;
 
   while (slot.client.get_status() !== HTTPClient.Status.STATUS_CONNECTED) {
     if (cancelled()) {
@@ -992,12 +1029,23 @@ async function ensureClientConnected(slot: HttpClientSlot, parsedUrl: ParsedUrl,
 
     const status = slot.client.get_status();
 
+    if (debugHttpClient && Date.now() - lastProgressLogMs >= 1000) {
+      lastProgressLogMs = Date.now();
+      console.log(
+        `[HTTP_CLIENT_DEBUG] ensureClientConnected:waiting host=${parsedUrl.host} port=${String(parsedUrl.port)} elapsed_ms=${String(lastProgressLogMs - startMs)} status=${String(status)} status_name=${getHttpClientStatusName(status)}`,
+      );
+    }
+
     if (isHttpClientStatusError(status)) {
-      throw new HttpInternalError(`HTTP connect failed for ${parsedUrl.url} (status=${status})`);
+      throw new HttpInternalError(
+        `HTTP connect failed for ${parsedUrl.url} (status=${status} ${getHttpClientStatusName(status)})`,
+      );
     }
 
     if (Date.now() - startMs > HttpConnectTimeoutMs) {
-      throw new HttpInternalError(`HTTP connect timed out after ${HttpConnectTimeoutMs}ms for ${parsedUrl.url}`);
+      throw new HttpInternalError(
+        `HTTP connect timed out after ${HttpConnectTimeoutMs}ms for ${parsedUrl.url} (status=${status} ${getHttpClientStatusName(status)})`,
+      );
     }
 
     await yieldHttpClientTick();
@@ -1034,20 +1082,36 @@ function createHttpClientResponseStream(
   cancelled: () => boolean,
   url: string,
   initialBytes: Uint8Array,
+  onStreamingResponseTerminated?: () => void,
 ): ReadableStream {
   let closed = false;
+  let streamTerminationNotified = false;
   let sawBody = false;
   let emittedBytes = initialBytes.byteLength;
   const expectedLength = slot.client.get_response_body_length();
   const preloadedBytes = initialBytes;
 
+  const notifyStreamTerminated = (): void => {
+    if (streamTerminationNotified) {
+      return;
+    }
+
+    streamTerminationNotified = true;
+    onStreamingResponseTerminated?.();
+  };
+
   const closeStreamClient = (context: string): void => {
     if (closed) {
+      notifyStreamTerminated();
       return;
     }
 
     closed = true;
-    closeSlotClientForContext(slot, context);
+    try {
+      closeSlotClientForContext(slot, context);
+    } finally {
+      notifyStreamTerminated();
+    }
   };
 
   return new ReadableStream({
@@ -1168,7 +1232,17 @@ function createHttpClientResponseStream(
 
           await yieldHttpClientTick();
         }
-      })();
+      })().catch((error: unknown) => {
+        try {
+          closeStreamClient('createHttpClientResponseStream[start-unhandled-error]');
+        } catch {
+          // Ignore close failures while propagating the original stream error.
+        }
+
+        controller.error(error instanceof Error
+          ? error
+          : new HttpInternalError(`HTTP body stream failed for ${url}`, error));
+      });
     },
     cancel() {
       closeStreamClient('createHttpClientResponseStream[cancel]');
@@ -1465,7 +1539,13 @@ async function runHttpClientRequest(
     const response: HttpResponse<ReadableStream> = {
       statusCode: responseStatusCode,
       headers: responseHeaders,
-      body: createHttpClientResponseStream(slot, cancelled, url, preloadedBytes),
+      body: createHttpClientResponseStream(
+        slot,
+        cancelled,
+        url,
+        preloadedBytes,
+        options.onStreamingResponseTerminated,
+      ),
     };
 
     if (Math.floor(response.statusCode / 100) !== 2) {
@@ -1617,6 +1697,51 @@ function tryDispatchNext(): void {
       returnToPool(slot);
     }
   })();
+}
+
+async function acquireDirectStreamingSlot(cancelled: () => boolean): Promise<void> {
+  while (true) {
+    if (cancelled()) {
+      throw new HttpAbortError();
+    }
+
+    if (activeDirectStreamingRequests < DirectStreamingMaxConcurrency) {
+      activeDirectStreamingRequests += 1;
+      if (debugHttpClient) {
+        console.log(
+          `[HTTP_CLIENT_DEBUG] direct-stream-slot acquired active=${String(activeDirectStreamingRequests)} pending_waiters=${String(pendingDirectStreamingAcquires.length)}`,
+        );
+      }
+      return;
+    }
+
+    if (debugHttpClient) {
+      console.log(
+        `[HTTP_CLIENT_DEBUG] direct-stream-slot waiting active=${String(activeDirectStreamingRequests)} pending_waiters=${String(pendingDirectStreamingAcquires.length + 1)}`,
+      );
+    }
+
+    await new Promise<void>(resolve => {
+      pendingDirectStreamingAcquires.push(resolve);
+    });
+  }
+}
+
+function releaseDirectStreamingSlot(): void {
+  if (activeDirectStreamingRequests <= 0) {
+    return;
+  }
+
+  activeDirectStreamingRequests -= 1;
+  if (debugHttpClient) {
+    console.log(
+      `[HTTP_CLIENT_DEBUG] direct-stream-slot released active=${String(activeDirectStreamingRequests)} pending_waiters=${String(pendingDirectStreamingAcquires.length)}`,
+    );
+  }
+  const resume = pendingDirectStreamingAcquires.shift();
+  if (resume) {
+    resume();
+  }
 }
 
 export class HttpInternalError extends Error {
@@ -1779,11 +1904,27 @@ async function executeDirectStreamingRequest(
     allowUnknownLengthRawStreamFallback: boolean;
   },
 ): Promise<HttpResponse<any>> {
+  await acquireDirectStreamingSlot(cancelled);
+  const releaseDirectStreamingOnResponseReturn = disableDirectStreamingBackpressure;
+
   const requestBody = normalizeRequestBody(body);
   const requestHeaders = await buildRequestHeadersWithCookies(url, effectiveHeaders);
   const slot = createHttpClientSlot();
   slot.inUse = true;
   let streamOwnedByResponse = false;
+  let directStreamingSlotReleased = false;
+
+  const releaseStreamingSlot = (context: string): void => {
+    if (directStreamingSlotReleased) {
+      return;
+    }
+
+    directStreamingSlotReleased = true;
+    if (debugHttpClient) {
+      console.log(`[HTTP_CLIENT_DEBUG] direct-stream-slot release context=${context}`);
+    }
+    releaseDirectStreamingSlot();
+  };
 
   try {
     const response = await runHttpClientRequest(
@@ -1796,6 +1937,11 @@ async function executeDirectStreamingRequest(
       {
         allowRawFallback: false,
         allowUnknownLengthRawStreamFallback: options.allowUnknownLengthRawStreamFallback,
+        onStreamingResponseTerminated: releaseDirectStreamingOnResponseReturn
+          ? undefined
+          : () => {
+            releaseStreamingSlot('stream-terminated');
+          },
         streamResponse: true,
       },
     );
@@ -1804,6 +1950,7 @@ async function executeDirectStreamingRequest(
 
     if (!streamOwnedByResponse) {
       closeSlotClientForContext(slot, 'executeDirectStreamingRequest[no-stream]');
+      releaseStreamingSlot('no-stream');
     }
 
     const [, , cookieDomain] = url.match(cookieRegex) ?? [];
@@ -1820,8 +1967,15 @@ async function executeDirectStreamingRequest(
       } catch {
         // ignore close failures while propagating original error.
       }
+      releaseStreamingSlot('error-no-stream');
     }
     throw error;
+  } finally {
+    if (releaseDirectStreamingOnResponseReturn || !streamOwnedByResponse) {
+      releaseStreamingSlot(releaseDirectStreamingOnResponseReturn
+        ? 'legacy-response-return'
+        : 'finally-no-stream');
+    }
   }
 }
 
