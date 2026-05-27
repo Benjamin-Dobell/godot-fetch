@@ -192,6 +192,7 @@ jobs:
       WPT_HOST: web-platform.test
       WPT_DOMAIN_WWW: www.web-platform.test
       WPT_DOMAIN_WWW2: www2.web-platform.test
+      PUPPETEER_CACHE_DIR: ${{ github.workspace }}/.cache/puppeteer
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -289,8 +290,42 @@ jobs:
       - name: Build Demo Scripts
         run: pnpm -C demo run build
 
-      - name: Install Chrome For Puppeteer
-        run: pnpm exec puppeteer browsers install chrome
+      - name: Setup Chrome For Puppeteer
+        id: setup-chrome
+        uses: browser-actions/setup-chrome@v2
+        with:
+          chrome-version: stable
+          install-dependencies: true
+
+      - name: Configure Puppeteer Chrome
+        run: |
+          set -euo pipefail
+          CHROME_PATH="${{ steps.setup-chrome.outputs.chrome-path }}"
+          echo "Installed Puppeteer Chrome: ${CHROME_PATH}"
+          if [ ! -e "${CHROME_PATH}" ]; then
+            echo "Installed Chrome does not exist at setup-chrome output path"
+            exit 1
+          fi
+          if [ ! -x "${CHROME_PATH}" ]; then
+            echo "Installed Puppeteer Chrome exists but is not executable; repairing mode bits"
+            chmod +x "${CHROME_PATH}"
+          fi
+          test -x "${CHROME_PATH}"
+          echo "PUPPETEER_EXECUTABLE_PATH=${CHROME_PATH}" >> "$GITHUB_ENV"
+
+      - name: Verify Puppeteer Chrome Availability
+        run: |
+          CHROME_PATH="${PUPPETEER_EXECUTABLE_PATH}"
+          echo "Resolved Puppeteer executable: ${CHROME_PATH}"
+          if [ ! -e "${CHROME_PATH}" ]; then
+            echo "Puppeteer executable does not exist at resolved path"
+            exit 1
+          fi
+          if [ ! -x "${CHROME_PATH}" ]; then
+            echo "Puppeteer executable exists but is not executable; repairing mode bits"
+            chmod +x "${CHROME_PATH}"
+          fi
+          test -x "${CHROME_PATH}"
 
       - name: Web Smoke Tests
         run: pnpm -C demo run test:web:basic
@@ -307,6 +342,7 @@ jobs:
       WPT_DOMAIN_WWW2: www2.web-platform.test
       WPT_WEB_FETCH_IMPLEMENTATION: browser
       GODOT_FETCH_MODE: conformant
+      PUPPETEER_CACHE_DIR: ${{ github.workspace }}/.cache/puppeteer
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -404,8 +440,42 @@ jobs:
       - name: Build Demo Scripts
         run: pnpm -C demo run build
 
-      - name: Install Chrome For Puppeteer
-        run: pnpm exec puppeteer browsers install chrome
+      - name: Setup Chrome For Puppeteer
+        id: setup-chrome
+        uses: browser-actions/setup-chrome@v2
+        with:
+          chrome-version: stable
+          install-dependencies: true
+
+      - name: Configure Puppeteer Chrome
+        run: |
+          set -euo pipefail
+          CHROME_PATH="${{ steps.setup-chrome.outputs.chrome-path }}"
+          echo "Installed Puppeteer Chrome: ${CHROME_PATH}"
+          if [ ! -e "${CHROME_PATH}" ]; then
+            echo "Installed Chrome does not exist at setup-chrome output path"
+            exit 1
+          fi
+          if [ ! -x "${CHROME_PATH}" ]; then
+            echo "Installed Puppeteer Chrome exists but is not executable; repairing mode bits"
+            chmod +x "${CHROME_PATH}"
+          fi
+          test -x "${CHROME_PATH}"
+          echo "PUPPETEER_EXECUTABLE_PATH=${CHROME_PATH}" >> "$GITHUB_ENV"
+
+      - name: Verify Puppeteer Chrome Availability
+        run: |
+          CHROME_PATH="${PUPPETEER_EXECUTABLE_PATH}"
+          echo "Resolved Puppeteer executable: ${CHROME_PATH}"
+          if [ ! -e "${CHROME_PATH}" ]; then
+            echo "Puppeteer executable does not exist at resolved path"
+            exit 1
+          fi
+          if [ ! -x "${CHROME_PATH}" ]; then
+            echo "Puppeteer executable exists but is not executable; repairing mode bits"
+            chmod +x "${CHROME_PATH}"
+          fi
+          test -x "${CHROME_PATH}"
 
       - name: WPT Web Browser
         run: pnpm -C demo run test:fetch:wpt:web:browser

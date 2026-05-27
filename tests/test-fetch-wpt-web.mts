@@ -536,18 +536,20 @@ async function runInBrowser(baseUrl: string, files: string[]): Promise<Record<st
     launchArgs.push(`--unsafely-treat-insecure-origin-as-secure=${baseUrl}`);
   }
   launchArgs.push(...ciSandboxBypassArgs);
+  const executablePath = process.env.PUPPETEER_EXECUTABLE_PATH;
   let browser;
   try {
     browser = await puppeteer.launch({
       headless: true,
       userDataDir: profileDir,
-      channel: 'chrome',
+      ...(executablePath ? { executablePath } : { channel: 'chrome' as const }),
       args: launchArgs,
     });
   } catch {
     browser = await puppeteer.launch({
       headless: true,
       userDataDir: profileDir,
+      ...(executablePath ? { executablePath } : {}),
       args: launchArgs,
     });
   }

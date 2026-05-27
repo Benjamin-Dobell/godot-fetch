@@ -297,8 +297,10 @@ async function withServer(
 
 async function runScenario(scenario: WebScenario, baseUrl: string): Promise<void> {
   const prefix = scenarioLogPrefix(scenario);
+  const executablePath = process.env.PUPPETEER_EXECUTABLE_PATH;
   const browser = await puppeteer.launch({
     headless: true,
+    ...(executablePath ? { executablePath } : {}),
     args: ['--ignore-certificate-errors', ...ciSandboxBypassArgs],
   });
 
