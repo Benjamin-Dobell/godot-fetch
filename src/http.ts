@@ -518,196 +518,197 @@ async function runRawHttpFallbackRequest(
 ): Promise<HttpResponse<PackedByteArray>> {
   const parsedUrl = parseRequestUrl(url);
   const tcp = new StreamPeerTCP();
-  const connectError = tcp.connect_to_host(parsedUrl.host, parsedUrl.port);
-  if (connectError !== GodotErrorOk) {
-    throw new HttpInternalError(`Raw HTTP fallback connect failed with Godot error: ${connectError}`);
-  }
-
-  const connectStartMs = Date.now();
-  while (tcp.get_status() === StreamPeerSocketStatusConnecting) {
-    if (cancelled()) {
-      tcp.disconnect_from_host();
-      throw new HttpAbortError();
-    }
-    const pollError = tcp.poll();
-    if (pollError !== GodotErrorOk) {
-      throw new HttpInternalError(`Raw HTTP fallback poll failed with Godot error: ${pollError}`);
-    }
-    if (Date.now() - connectStartMs > HttpConnectTimeoutMs) {
-      throw new HttpInternalError(`Raw HTTP fallback connect timed out after ${HttpConnectTimeoutMs}ms for ${url}`);
-    }
-    await yieldHttpClientTick();
-  }
-
-  if (tcp.get_status() !== StreamPeerSocketStatusConnected) {
-    throw new HttpInternalError(`Raw HTTP fallback socket did not connect for ${url} (status=${tcp.get_status()})`);
-  }
-
   let peer: StreamPeerTCP | StreamPeerTLS = tcp;
-  if (parsedUrl.scheme === 'https') {
-    const tls = new StreamPeerTLS();
-    const tlsOptions = getTlsOptionsForUrl(parsedUrl);
-    const tlsError = typeof tlsOptions === 'undefined'
-      ? tls.connect_to_stream(tcp, parsedUrl.host)
-      : tls.connect_to_stream(tcp, parsedUrl.host, tlsOptions);
-    if (tlsError !== GodotErrorOk) {
-      throw new HttpInternalError(`Raw HTTPS fallback TLS handshake failed with Godot error: ${tlsError}`);
+  try {
+    const connectError = tcp.connect_to_host(parsedUrl.host, parsedUrl.port);
+    if (connectError !== GodotErrorOk) {
+      throw new HttpInternalError(`Raw HTTP fallback connect failed with Godot error: ${connectError}`);
     }
 
-    const tlsStartMs = Date.now();
-    while (tls.get_status() === StreamPeerTlsStatusHandshaking) {
+    const connectStartMs = Date.now();
+    while (tcp.get_status() === StreamPeerSocketStatusConnecting) {
       if (cancelled()) {
-        tls.disconnect_from_stream();
-        tcp.disconnect_from_host();
         throw new HttpAbortError();
       }
-      tls.poll();
-      if (Date.now() - tlsStartMs > HttpConnectTimeoutMs) {
-        throw new HttpInternalError(`Raw HTTPS fallback handshake timed out after ${HttpConnectTimeoutMs}ms for ${url}`);
+      const pollError = tcp.poll();
+      if (pollError !== GodotErrorOk) {
+        throw new HttpInternalError(`Raw HTTP fallback poll failed with Godot error: ${pollError}`);
+      }
+      if (Date.now() - connectStartMs > HttpConnectTimeoutMs) {
+        throw new HttpInternalError(`Raw HTTP fallback connect timed out after ${HttpConnectTimeoutMs}ms for ${url}`);
       }
       await yieldHttpClientTick();
     }
 
-    if (tls.get_status() !== StreamPeerTlsStatusConnected) {
-      throw new HttpInternalError(`Raw HTTPS fallback socket did not connect for ${url} (status=${tls.get_status()})`);
+    if (tcp.get_status() !== StreamPeerSocketStatusConnected) {
+      throw new HttpInternalError(`Raw HTTP fallback socket did not connect for ${url} (status=${tcp.get_status()})`);
     }
-    peer = tls;
-  }
 
-  const rawBody = toPackedBody(body);
-  const requestBytes = buildRawRequest(methodName, parsedUrl, headers, rawBody);
-  const writeError = peer.put_data(requestBytes);
-  if (writeError !== GodotErrorOk) {
-    throw new HttpInternalError(`Raw HTTP fallback write failed with Godot error: ${writeError}`);
-  }
+    if (parsedUrl.scheme === 'https') {
+      const tls = new StreamPeerTLS();
+      const tlsOptions = getTlsOptionsForUrl(parsedUrl);
+      const tlsError = typeof tlsOptions === 'undefined'
+        ? tls.connect_to_stream(tcp, parsedUrl.host)
+        : tls.connect_to_stream(tcp, parsedUrl.host, tlsOptions);
+      if (tlsError !== GodotErrorOk) {
+        throw new HttpInternalError(`Raw HTTPS fallback TLS handshake failed with Godot error: ${tlsError}`);
+      }
 
-  let responseBytes: ByteView = new Uint8Array(0);
-  const readStartMs = Date.now();
-  let finalStatus = -1;
-  let parsedHeaders: null | HttpHeaders = null;
-  let parsedStatusCode = -1;
-  let headerBodyOffset = -1;
+      const tlsStartMs = Date.now();
+      while (tls.get_status() === StreamPeerTlsStatusHandshaking) {
+        if (cancelled()) {
+          throw new HttpAbortError();
+        }
+        tls.poll();
+        if (Date.now() - tlsStartMs > HttpConnectTimeoutMs) {
+          throw new HttpInternalError(`Raw HTTPS fallback handshake timed out after ${HttpConnectTimeoutMs}ms for ${url}`);
+        }
+        await yieldHttpClientTick();
+      }
 
-  const shouldExpectBody = methodName !== 'HEAD';
+      if (tls.get_status() !== StreamPeerTlsStatusConnected) {
+        throw new HttpInternalError(`Raw HTTPS fallback socket did not connect for ${url} (status=${tls.get_status()})`);
+      }
+      peer = tls;
+    }
 
-  while (true) {
-    if (cancelled()) {
+    const rawBody = toPackedBody(body);
+    const requestBytes = buildRawRequest(methodName, parsedUrl, headers, rawBody);
+    const writeError = peer.put_data(requestBytes);
+    if (writeError !== GodotErrorOk) {
+      throw new HttpInternalError(`Raw HTTP fallback write failed with Godot error: ${writeError}`);
+    }
+
+    let responseBytes: ByteView = new Uint8Array(0);
+    const readStartMs = Date.now();
+    let finalStatus = -1;
+    let parsedHeaders: null | HttpHeaders = null;
+    let parsedStatusCode = -1;
+    let headerBodyOffset = -1;
+
+    const shouldExpectBody = methodName !== 'HEAD';
+
+    while (true) {
+      if (cancelled()) {
+        throw new HttpAbortError();
+      }
+
       if (peer instanceof StreamPeerTLS) {
-        peer.disconnect_from_stream();
-      }
-      tcp.disconnect_from_host();
-      throw new HttpAbortError();
-    }
-
-    if (peer instanceof StreamPeerTLS) {
-      peer.poll();
-    } else {
-      const pollError = peer.poll();
-      if (pollError !== GodotErrorOk) {
-        throw new HttpInternalError(`Raw HTTP fallback read poll failed with Godot error: ${pollError}`);
-      }
-    }
-
-    const available = peer.get_available_bytes();
-    if (available > 0) {
-      const result = peer.get_partial_data(available) as StreamPeerReadResult;
-      const readError = result.get(0);
-      if (typeof readError !== 'number' || readError !== GodotErrorOk) {
-        throw new HttpInternalError(`Raw HTTP fallback read failed with Godot error: ${String(readError)}`);
-      }
-      const readChunk = result.get(1);
-      if (!(readChunk instanceof PackedByteArray)) {
-        throw new HttpInternalError('Raw HTTP fallback read returned invalid data payload');
-      }
-      const readChunkBytes = new Uint8Array(readChunk.size());
-      readChunkBytes.set(new Uint8Array(readChunk.to_array_buffer()));
-      responseBytes = appendBytes(responseBytes, readChunkBytes);
-    }
-
-    if (parsedHeaders === null) {
-      const boundary = findHeaderBoundary(responseBytes);
-      if (boundary !== null) {
-        const headerText = bytesToUtf8String(responseBytes.subarray(0, boundary.headerEnd));
-        const parsed = parseRawHttpHeaders(headerText);
-        parsedHeaders = parsed.headers;
-        parsedStatusCode = parsed.statusCode;
-        headerBodyOffset = boundary.headerEnd + boundary.terminatorLength;
-      }
-    }
-
-    if (parsedHeaders !== null) {
-      if (!shouldExpectBody || parsedStatusCode === 204 || parsedStatusCode === 304 || (parsedStatusCode >= 100 && parsedStatusCode < 200)) {
-        return {
-          statusCode: parsedStatusCode,
-          headers: parsedHeaders,
-          body: new PackedByteArray(),
-        };
-      }
-
-      const bodyBytes = responseBytes.subarray(headerBodyOffset);
-      const contentLengthHeader = getHeaderValue(parsedHeaders, 'content-length');
-      const transferEncoding = getHeaderValue(parsedHeaders, 'transfer-encoding')?.toLowerCase() ?? '';
-
-      if (transferEncoding.includes('chunked')) {
-        try {
-          const decodedBody = decodeChunkedHttpBodyBytes(bodyBytes);
-          return {
-            statusCode: parsedStatusCode,
-            headers: parsedHeaders,
-            body: toPackedByteArrayFromBytes(decodedBody),
-          };
-        } catch (error) {
-          if (!(error instanceof IncompleteChunkedBodyError)) {
-            throw error;
-          }
-          // Continue reading until a complete chunked body is available.
-        }
-      } else if (contentLengthHeader !== null) {
-        const contentLength = Number.parseInt(contentLengthHeader, 10);
-        if (Number.isFinite(contentLength) && contentLength >= 0 && bodyBytes.length >= contentLength) {
-          return {
-            statusCode: parsedStatusCode,
-            headers: parsedHeaders,
-            body: toPackedByteArrayFromBytes(bodyBytes.slice(0, contentLength)),
-          };
+        peer.poll();
+      } else {
+        const pollError = peer.poll();
+        if (pollError !== GodotErrorOk) {
+          throw new HttpInternalError(`Raw HTTP fallback read poll failed with Godot error: ${pollError}`);
         }
       }
-    }
 
-    const status = peer.get_status();
-    finalStatus = status;
-    if (status === 0) {
-      if (parsedHeaders === null && responseBytes.length > 0) {
-        const headerText = bytesToUtf8String(responseBytes);
-        const parsed = parseRawHttpHeaders(headerText);
-        parsedHeaders = parsed.headers;
-        parsedStatusCode = parsed.statusCode;
-        headerBodyOffset = responseBytes.length;
+      const available = peer.get_available_bytes();
+      if (available > 0) {
+        const result = peer.get_partial_data(available) as StreamPeerReadResult;
+        const readError = result.get(0);
+        if (typeof readError !== 'number' || readError !== GodotErrorOk) {
+          throw new HttpInternalError(`Raw HTTP fallback read failed with Godot error: ${String(readError)}`);
+        }
+        const readChunk = result.get(1);
+        if (!(readChunk instanceof PackedByteArray)) {
+          throw new HttpInternalError('Raw HTTP fallback read returned invalid data payload');
+        }
+        const readChunkBytes = new Uint8Array(readChunk.size());
+        readChunkBytes.set(new Uint8Array(readChunk.to_array_buffer()));
+        responseBytes = appendBytes(responseBytes, readChunkBytes);
+      }
+
+      if (parsedHeaders === null) {
+        const boundary = findHeaderBoundary(responseBytes);
+        if (boundary !== null) {
+          const headerText = bytesToUtf8String(responseBytes.subarray(0, boundary.headerEnd));
+          const parsed = parseRawHttpHeaders(headerText);
+          parsedHeaders = parsed.headers;
+          parsedStatusCode = parsed.statusCode;
+          headerBodyOffset = boundary.headerEnd + boundary.terminatorLength;
+        }
       }
 
       if (parsedHeaders !== null) {
-        const bodyBytes = responseBytes.subarray(Math.max(0, headerBodyOffset));
-        return {
-          statusCode: parsedStatusCode,
-          headers: parsedHeaders,
-          body: toPackedByteArrayFromBytes(bodyBytes),
-        };
+        if (!shouldExpectBody || parsedStatusCode === 204 || parsedStatusCode === 304 || (parsedStatusCode >= 100 && parsedStatusCode < 200)) {
+          return {
+            statusCode: parsedStatusCode,
+            headers: parsedHeaders,
+            body: new PackedByteArray(),
+          };
+
+        }
+
+        const bodyBytes = responseBytes.subarray(headerBodyOffset);
+        const contentLengthHeader = getHeaderValue(parsedHeaders, 'content-length');
+        const transferEncoding = getHeaderValue(parsedHeaders, 'transfer-encoding')?.toLowerCase() ?? '';
+
+        if (transferEncoding.includes('chunked')) {
+          try {
+            const decodedBody = decodeChunkedHttpBodyBytes(bodyBytes);
+            return {
+              statusCode: parsedStatusCode,
+              headers: parsedHeaders,
+              body: toPackedByteArrayFromBytes(decodedBody),
+            };
+          } catch (error) {
+            if (!(error instanceof IncompleteChunkedBodyError)) {
+              throw error;
+            }
+            // Continue reading until a complete chunked body is available.
+          }
+        } else if (contentLengthHeader !== null) {
+          const contentLength = Number.parseInt(contentLengthHeader, 10);
+          if (Number.isFinite(contentLength) && contentLength >= 0 && bodyBytes.length >= contentLength) {
+            return {
+              statusCode: parsedStatusCode,
+              headers: parsedHeaders,
+              body: toPackedByteArrayFromBytes(bodyBytes.slice(0, contentLength)),
+            };
+          }
+        }
       }
-    }
-    if ((peer instanceof StreamPeerTLS && status !== StreamPeerTlsStatusConnected && status !== StreamPeerTlsStatusHandshaking)
-      || (!(peer instanceof StreamPeerTLS) && status !== StreamPeerSocketStatusConnected)) {
-      break;
+
+      const status = peer.get_status();
+      finalStatus = status;
+      if (status === 0) {
+        if (parsedHeaders === null && responseBytes.length > 0) {
+          const headerText = bytesToUtf8String(responseBytes);
+          const parsed = parseRawHttpHeaders(headerText);
+          parsedHeaders = parsed.headers;
+          parsedStatusCode = parsed.statusCode;
+          headerBodyOffset = responseBytes.length;
+        }
+
+        if (parsedHeaders !== null) {
+          const bodyBytes = responseBytes.subarray(Math.max(0, headerBodyOffset));
+          return {
+            statusCode: parsedStatusCode,
+            headers: parsedHeaders,
+            body: toPackedByteArrayFromBytes(bodyBytes),
+          };
+        }
+      }
+      if ((peer instanceof StreamPeerTLS && status !== StreamPeerTlsStatusConnected && status !== StreamPeerTlsStatusHandshaking)
+        || (!(peer instanceof StreamPeerTLS) && status !== StreamPeerSocketStatusConnected)) {
+        break;
+      }
+
+      if (Date.now() - readStartMs > RawHttpHeaderTimeoutMs) {
+        throw new HttpInternalError(`Raw HTTP fallback timed out waiting for response headers after ${RawHttpHeaderTimeoutMs}ms for ${url}`);
+      }
+      await yieldHttpClientTick();
     }
 
-    if (Date.now() - readStartMs > RawHttpHeaderTimeoutMs) {
-      throw new HttpInternalError(`Raw HTTP fallback timed out waiting for response headers after ${RawHttpHeaderTimeoutMs}ms for ${url}`);
+    throw new HttpInternalError(
+      `Raw HTTP fallback ended before complete response was received for ${url} (status=${finalStatus}, bytes=${responseBytes.length})`,
+    );
+  } finally {
+    if (peer instanceof StreamPeerTLS) {
+      peer.disconnect_from_stream();
     }
-    await yieldHttpClientTick();
+    tcp.disconnect_from_host();
   }
-
-  throw new HttpInternalError(
-    `Raw HTTP fallback ended before complete response was received for ${url} (status=${finalStatus}, bytes=${responseBytes.length})`,
-  );
 }
 
 function parseRequestUrl(url: string): ParsedUrl {
@@ -1023,7 +1024,6 @@ async function ensureClientConnected(slot: HttpClientSlot, parsedUrl: ParsedUrl,
 
     if (!polled) {
       await yieldHttpClientTick();
-
       continue;
     }
 
@@ -1439,14 +1439,14 @@ async function runHttpClientRequest(
     try {
       polled = pollClientSlot(slot);
     } catch (error) {
+      if (isRecoverableWebPollDisconnectError(slot, error)) {
+        break;
+      }
+
       if (canUseRawFallback && isRawFallbackEligible(error)) {
         closeSlotClientForContext(slot, 'runHttpClientRequest[raw-fallback]');
 
         return await runRawHttpFallbackRequest(methodName, url, body, headers, cancelled);
-      }
-
-      if (isRecoverableWebPollDisconnectError(slot, error)) {
-        break;
       }
 
       throw error;
