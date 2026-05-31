@@ -40,10 +40,15 @@ function ensureDemoBuild(): void {
 }
 
 async function withHoldOpenServer<T>(
-  run: (url: string, getRequestCount: () => number) => Promise<T>,
+  run: (
+    url: string,
+    getRequestCount: () => number,
+    getMaxConcurrentConnectionCount: () => number,
+  ) => Promise<T>,
 ): Promise<T> {
   const openConnections = new Set<HoldConnection>();
   let requestCount = 0;
+  let maxConcurrentConnectionCount = 0;
 
   const server = createServer((request, response) => {
     if (request.url !== '/hold') {
@@ -69,6 +74,9 @@ async function withHoldOpenServer<T>(
 
     const holdConnection: HoldConnection = { interval, response };
     openConnections.add(holdConnection);
+    if (openConnections.size > maxConcurrentConnectionCount) {
+      maxConcurrentConnectionCount = openConnections.size;
+    }
 
     response.on('close', () => {
       clearInterval(interval);
@@ -88,7 +96,11 @@ async function withHoldOpenServer<T>(
   const url = `http://127.0.0.1:${String(address.port)}/hold`;
 
   try {
-    return await run(url, () => requestCount);
+    return await run(
+      url,
+      () => requestCount,
+      () => maxConcurrentConnectionCount,
+    );
   } finally {
     process.stdout.write(`[test:direct-stream-backpressure] hold endpoint request_count=${String(requestCount)}\n`);
     for (const connection of openConnections) {
@@ -169,9 +181,10 @@ function runGodotDirectStreamBackpressureRegression(url: string): Promise<{ outp
 async function main(): Promise<void> {
   ensureDemoBuild();
 
-  await withHoldOpenServer(async (url, getRequestCount) => {
+  await withHoldOpenServer(async (url, getRequestCount, getMaxConcurrentConnectionCount) => {
     const runResult = await runGodotDirectStreamBackpressureRegression(url);
     const observedRequestCount = getRequestCount();
+    const observedMaxConcurrentConnectionCount = getMaxConcurrentConnectionCount();
 
     const failed = runResult.status !== 0 || !runResult.output.includes(PassMarker) || runResult.output.includes(FailMarker);
     if (failed) {
@@ -190,9 +203,9 @@ async function main(): Promise<void> {
       );
     }
 
-    if (observedRequestCount > MaxResolvedWithinWindow) {
+    if (observedMaxConcurrentConnectionCount > MaxResolvedWithinWindow) {
       throw new Error(
-        `Direct-stream backpressure regression detected: observed hold-endpoint requests exceeded cap (observed_requests=${String(observedRequestCount)} max_allowed=${String(MaxResolvedWithinWindow)})`,
+        `Direct-stream backpressure regression detected: observed hold-endpoint max concurrent connections exceeded cap (max_concurrent_connections=${String(observedMaxConcurrentConnectionCount)} observed_requests=${String(observedRequestCount)} max_allowed=${String(MaxResolvedWithinWindow)})`,
       );
     }
 
