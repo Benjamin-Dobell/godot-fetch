@@ -1,4 +1,5 @@
 import { EditorExportPlugin, DirAccess, FileAccess, PackedStringArray } from 'godot';
+import { createClassBinder } from 'godot.annotations';
 
 const WPT_CACHE_ROOT = 'res://wpt-cache';
 const WPT_RUNNER_SCRIPTS_ROOT = 'res://.godot/GodotJS/scripts/wpt';
@@ -11,6 +12,10 @@ const REQUIRED_RUNNER_FILES = [
   'res://.godot/GodotJS/scripts/wpt/fetch-wpt-runner-browser-node.js.map',
 ];
 
+const bind = createClassBinder();
+
+@bind()
+@bind.tool()
 export default class WptCacheExportPlugin extends EditorExportPlugin {
   override _get_name(): string {
     return 'WptCacheExportPlugin';

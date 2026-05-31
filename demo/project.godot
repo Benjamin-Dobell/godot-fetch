@@ -8,6 +8,10 @@
 
 config_version=5
 
+[GodotJS]
+
+runtime/debugger/debugger_port=9249
+
 [animation]
 
 compatibility/default_parent_skeleton_in_mesh_instance_3d=true
@@ -15,7 +19,6 @@ compatibility/default_parent_skeleton_in_mesh_instance_3d=true
 [application]
 
 config/name="Godot Fetch Demo / Test Suite"
-run/main_scene=""
 config/features=PackedStringArray("4.7")
 run/main_scene.wpt_polyfill="res://FetchRunnerPolyfill.tscn"
 run/main_scene.wpt_browser="res://WptRunnerBrowser.tscn"
@@ -28,10 +31,6 @@ settings/stdout/verbose_stdout=true
 [editor_plugins]
 
 enabled=PackedStringArray("res://addons/wpt_cache_export/plugin.cfg", "res://addons/godot-sqlite/plugin.cfg")
-
-[GodotJS]
-
-runtime/debugger/debugger_port=9249
 
 [rendering]
 
