@@ -24,6 +24,8 @@ import {
     fetch as ourFetch,
 } from './standards';
 
+export * from './caching';
+
 function toWrappedBody(body: null | FetchBodyInit | undefined): null | FetchBodyInit | undefined {
     if (body instanceof PackedByteArray) {
         return new Uint8Array(body.to_array_buffer());

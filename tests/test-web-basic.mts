@@ -20,13 +20,6 @@ const StreamChunkSize = 64 * 1024;
 const StreamChunkCount = 32;
 const StreamTotalBytes = StreamChunkSize * StreamChunkCount;
 
-const BridgeFetchUrlEnv = process.env.BRIDGE_WEB_FETCH_URL;
-const bridgeFetchUrl = typeof BridgeFetchUrlEnv === 'string'
-  ? (BridgeFetchUrlEnv.trim().length > 0 ? BridgeFetchUrlEnv : null)
-  : '/http-smoke';
-const bridgeIterations = Number.parseInt(process.env.BRIDGE_WEB_ITERATIONS ?? '20', 10);
-const bridgeWaitMs = Number.parseInt(process.env.BRIDGE_WEB_WAIT_MS ?? '25', 10);
-
 const PollPassMarker = '[WEB_HTTP_POLL_REGRESSION] PASS';
 const PollFailMarker = '[WEB_HTTP_POLL_REGRESSION] FAIL';
 const PollLegacyFailureMarker = 'HTTP poll failed with Godot error: 3';
@@ -35,7 +28,7 @@ const IgnorablePageErrorSubstrings = [
   "Failed to construct 'AudioWorkletNode': parameter 1 is not of type 'BaseAudioContext'.",
 ];
 
-type WebScenario = 'http' | 'stream' | 'bridge' | 'http-poll';
+type WebScenario = 'http' | 'stream' | 'http-poll';
 
 const ciSandboxBypassArgs =
   process.platform === 'linux' && process.env.CI === 'true'
@@ -44,12 +37,12 @@ const ciSandboxBypassArgs =
 
 function parseScenarioArg(): WebScenario {
   const arg = process.argv[2];
-  if (arg === 'http' || arg === 'stream' || arg === 'bridge' || arg === 'http-poll') {
+  if (arg === 'http' || arg === 'stream' || arg === 'http-poll') {
     return arg;
   }
 
   throw new Error(
-    `Missing or invalid web scenario argument. Expected one of: http, stream, bridge, http-poll. Received: ${arg ?? '<none>'}`,
+    `Missing or invalid web scenario argument. Expected one of: http, stream, http-poll. Received: ${arg ?? '<none>'}`,
   );
 }
 
@@ -59,8 +52,6 @@ function scenarioLogPrefix(scenario: WebScenario): string {
       return '[test:http:web]';
     case 'stream':
       return '[test:stream:web]';
-    case 'bridge':
-      return '[test:bridge:web]';
     case 'http-poll':
       return '[test:http:poll:web]';
     default:
@@ -74,8 +65,6 @@ function webDistRootForScenario(scenario: WebScenario): string {
       return resolve(demoRoot, 'dist/web-http-smoke');
     case 'stream':
       return resolve(demoRoot, 'dist/web-stream-smoke');
-    case 'bridge':
-      return resolve(demoRoot, 'dist/web-bridge-smoke');
     case 'http-poll':
       return resolve(demoRoot, 'dist/web-http-poll-regression');
     default:
@@ -87,7 +76,6 @@ function exportPresetForScenario(scenario: WebScenario): string {
   switch (scenario) {
     case 'http':
     case 'stream':
-    case 'bridge':
       return 'Web';
     case 'http-poll':
       return 'Web HTTP Poll Regression';
@@ -102,8 +90,6 @@ function successMessageForScenario(scenario: WebScenario): string {
       return '[test:http:web] web HTTP smoke passed';
     case 'stream':
       return '[test:stream:web] web streaming smoke passed';
-    case 'bridge':
-      return '[test:bridge:web] bridge sanity web test passed';
     case 'http-poll':
       return '[test:http:poll:web] web HTTP poll regression passed';
     default:
@@ -149,18 +135,6 @@ function writeRuntimeConfigForScenario(scenario: WebScenario): void {
         'utf8',
       );
       return;
-    case 'bridge':
-      writeFileSync(
-        webRuntimeConfigPath,
-        JSON.stringify({
-          webBridgeSmoke: true,
-          ...(bridgeFetchUrl ? { webBridgeUrl: bridgeFetchUrl } : {}),
-          webBridgeIterations: bridgeIterations,
-          webBridgeWaitMs: bridgeWaitMs,
-        }),
-        'utf8',
-      );
-      return;
     case 'http-poll':
       rmSync(webRuntimeConfigPath, { force: true });
       return;
@@ -170,7 +144,7 @@ function writeRuntimeConfigForScenario(scenario: WebScenario): void {
 }
 
 function serveScenarioRoute(scenario: WebScenario, pathname: string, response: import('node:http').ServerResponse): boolean {
-  if (scenario === 'http' || scenario === 'bridge') {
+  if (scenario === 'http') {
     if (pathname === '/http-smoke') {
       response.statusCode = 200;
       response.setHeader('Content-Type', 'text/plain; charset=utf-8');
@@ -241,7 +215,7 @@ async function withServer(
       const rawUrl = request.url ?? '/';
       const pathname = rawUrl.split('?')[0] ?? '/';
 
-      if (scenario === 'http' || scenario === 'bridge' || scenario === 'http-poll') {
+      if (scenario === 'http' || scenario === 'http-poll') {
         process.stdout.write(`${prefix}[server] ${request.method ?? 'GET'} ${rawUrl}\n`);
       }
 
@@ -349,16 +323,12 @@ async function runScenario(scenario: WebScenario, baseUrl: string): Promise<void
         if (scenario === 'stream' && text.includes('[WEB_STREAM_SMOKE] PASS')) {
           pass = true;
         }
-        if (scenario === 'bridge' && text.includes('[WEB_BRIDGE_SMOKE] PASS')) {
-          pass = true;
-        }
         if (scenario === 'http-poll' && text.includes(PollPassMarker)) {
           pass = true;
         }
 
         const failMatch =
           (scenario === 'stream' && text.includes('[WEB_STREAM_SMOKE] FAIL'))
-          || (scenario === 'bridge' && text.includes('[WEB_BRIDGE_SMOKE] FAIL'))
           || (scenario === 'http-poll' && text.includes(PollFailMarker))
           || text.startsWith('[WPT] ');
         if (failMatch) {
@@ -371,7 +341,7 @@ async function runScenario(scenario: WebScenario, baseUrl: string): Promise<void
         }
       });
 
-      if (scenario === 'bridge' || scenario === 'http-poll') {
+      if (scenario === 'http-poll') {
         page.on('requestfailed', (request) => {
           const failure = request.failure();
           process.stdout.write(`${prefix}[requestfailed] ${request.method()} ${request.url()} error=${failure?.errorText ?? '<unknown>'}\n`);
@@ -408,15 +378,6 @@ async function runScenario(scenario: WebScenario, baseUrl: string): Promise<void
       url = `${baseUrl}/index.html?web_http_smoke=1&web_http_url=${encodeURIComponent('/http-smoke')}&web_http_expected=ok`;
     } else if (scenario === 'stream') {
       url = `${baseUrl}/index.html?web_stream_smoke=1&web_stream_url=${encodeURIComponent('/stream.bin')}&web_stream_expected_bytes=${String(StreamTotalBytes)}`;
-    } else if (scenario === 'bridge') {
-      const params = new URLSearchParams();
-      params.set('web_bridge_smoke', '1');
-      if (bridgeFetchUrl) {
-        params.set('web_bridge_url', bridgeFetchUrl);
-      }
-      params.set('web_bridge_iterations', String(bridgeIterations));
-      params.set('web_bridge_wait_ms', String(bridgeWaitMs));
-      url = `${baseUrl}/index.html?${params.toString()}`;
     }
 
     await page.goto(url, { waitUntil: 'load', timeout: 120_000 });
@@ -438,9 +399,6 @@ async function runScenario(scenario: WebScenario, baseUrl: string): Promise<void
       if (scenario === 'stream') {
         throw new Error(`web stream smoke failed: ${failMessage}`);
       }
-      if (scenario === 'bridge') {
-        throw new Error(`web bridge smoke failed: ${failMessage}`);
-      }
       throw new Error(`web poll regression failed: ${failMessage}`);
     }
 
@@ -458,9 +416,6 @@ async function runScenario(scenario: WebScenario, baseUrl: string): Promise<void
       }
       if (scenario === 'stream') {
         throw new Error('web stream smoke timed out without PASS marker');
-      }
-      if (scenario === 'bridge') {
-        throw new Error('web bridge smoke timed out without PASS marker');
       }
       throw new Error('web poll regression timed out without PASS marker');
     }

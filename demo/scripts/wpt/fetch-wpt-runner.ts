@@ -1,6 +1,7 @@
 // @ts-nocheck
 import { DirAccess, FileAccess, OS, SceneTree, is_instance_valid as isInstanceValidDirect } from 'godot';
 import { is_instance_valid as isInstanceValidLibApi } from 'godot.lib.api';
+import { createNonEvictingMemoryHttpCache, setHttpCache } from 'godot-fetch/caching';
 import { setConformanceMode } from 'godot-fetch/conformance';
 
 const WPT_ROOT = 'res://wpt-cache';
@@ -586,11 +587,18 @@ function createBase64Helpers() {
     const length = input.length;
     let offset = 0;
     while (offset < length) {
-      const byte0 = input.charCodeAt(offset += 1) & 0xff;
+      const byte0 = input.charCodeAt(offset) & 0xff;
+      offset += 1;
       const hasByte1 = offset < length;
-      const byte1 = hasByte1 ? input.charCodeAt(offset += 1) & 0xff : 0;
+      const byte1 = hasByte1 ? input.charCodeAt(offset) & 0xff : 0;
+      if (hasByte1) {
+        offset += 1;
+      }
       const hasByte2 = offset < length;
-      const byte2 = hasByte2 ? input.charCodeAt(offset += 1) & 0xff : 0;
+      const byte2 = hasByte2 ? input.charCodeAt(offset) & 0xff : 0;
+      if (hasByte2) {
+        offset += 1;
+      }
 
       const enc0 = byte0 >> 2;
       const enc1 = ((byte0 & 0x03) << 4) | (byte1 >> 4);
@@ -1016,6 +1024,9 @@ async function runWptSuite(options = {}) {
   const fetchMode = options.fetchMode === 'fast' ? 'fast' : 'conformant';
   const fetchImplementation = options.fetchImplementation === 'browser' ? 'browser' : 'polyfill';
   setConformanceMode(fetchMode);
+  setHttpCache(fetchMode === 'conformant' && fetchImplementation === 'polyfill'
+    ? createNonEvictingMemoryHttpCache()
+    : null);
 
   const args = {
     files: Array.isArray(options.files) ? options.files : [],
@@ -1077,6 +1088,7 @@ async function runWptSuite(options = {}) {
 
   return {
     feature: FEATURE,
+    fetchMode: args.fetchMode,
     fetchImplementation: args.fetchImplementation,
     filesRan: fileResults.length,
     filesTotal: files.length,
@@ -1092,7 +1104,6 @@ class FetchWptRunner extends SceneTree {
       const summary = await runWptSuite({
         files: args.files,
         debug: args.debug,
-        fetchMode: args.fetchMode,
         host: args.host,
         domainWww: args.domainWww,
         domainWww2: args.domainWww2,

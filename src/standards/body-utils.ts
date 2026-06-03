@@ -15,6 +15,10 @@ export function toUint8Array(value: BodyInit): Uint8Array {
   }
 
   if (value instanceof FormData) {
+    if (value.isEmpty()) {
+      return new Uint8Array();
+    }
+
     return new TextEncoder().encode(value.toMultipartBody());
   }
 
@@ -51,6 +55,10 @@ export function toBodyString(value: BodyInit): string {
   }
 
   if (value instanceof FormData) {
+    if (value.isEmpty()) {
+      return '';
+    }
+
     return value.toMultipartBody();
   }
 

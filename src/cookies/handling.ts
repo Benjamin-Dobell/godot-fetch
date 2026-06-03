@@ -91,7 +91,9 @@ function parseCookies(requestDomain: string, headers: HttpHeaders): Array<Readon
 export async function handleCookies(requestDomain: string, headers: HttpHeaders): Promise<void> {
   const cookies = parseCookies(requestDomain, headers);
   const permittedCookieDomains = getCookiePermittedDomains();
-  const permittedCookies = cookies.filter(cookie => permittedCookieDomains.includes(cookie.domain));
+  const permittedCookies = permittedCookieDomains.length === 0
+    ? cookies
+    : cookies.filter(cookie => permittedCookieDomains.includes(cookie.domain));
   await getCookieStore().setCookies(permittedCookies);
 }
 

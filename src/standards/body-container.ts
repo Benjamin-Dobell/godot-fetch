@@ -3,6 +3,7 @@ import { createAbortError, normalizeAbortRejectionReason, type AbortSignal } fro
 import { Blob } from './blob';
 import { copyBuffer, toBodyString, toUint8Array } from './body-utils';
 import { TextDecoder } from './encoding';
+import { FormData } from './form-data';
 import { ReadableStream, isReadableStreamLike, teeReadableStreamLike, type ReadableStreamLike } from './stream';
 import type { BodyInit } from './types';
 
@@ -12,12 +13,24 @@ function makeSafeBytesResult(bytes: Uint8Array): { bytes: Uint8Array } {
   return result;
 }
 
+function normalizeStreamReadError(error: unknown): unknown {
+  if (
+    error instanceof Error
+    && (error.name === 'HttpInternalError' || error.name === 'HttpResponseError')
+  ) {
+    return new TypeError(error.message);
+  }
+
+  return error;
+}
+
 export class BodyContainer {
   body: null | ReadableStream;
   bodyUsed: boolean;
   private readonly hasBody: boolean;
   private bodyBytes: null | Uint8Array;
   private readonly bodyText: null | string;
+  private readonly emptyFormDataBody: boolean;
   private readonly resolveMimeType?: () => null | string;
   private readonly signal?: AbortSignal;
 
@@ -25,6 +38,7 @@ export class BodyContainer {
     this.bodyUsed = false;
     this.signal = signal;
     this.resolveMimeType = resolveMimeType;
+    this.emptyFormDataBody = body instanceof FormData && body.isEmpty();
 
     if (body === null) {
       this.hasBody = false;
@@ -121,12 +135,16 @@ export class BodyContainer {
   }
 
   cloneBody(): null | BodyInit {
+    const streamBody = this.getStreamLike();
+    if (streamBody !== null && ((streamBody.isLocked?.() ?? false) || (streamBody.isDisturbed?.() ?? false))) {
+      throw new TypeError('Cannot clone an unreadable stream body');
+    }
+
     if (this.bodyBytes === null) {
       if (this.body === null) {
         return null;
       }
 
-      const streamBody = this.getStreamLike();
       if (streamBody === null) {
         return null;
       }
@@ -151,12 +169,16 @@ export class BodyContainer {
       throw new TypeError('Cannot clone an unreadable stream body');
     }
 
+    const streamBody = this.getStreamLike();
+    if (streamBody !== null && ((streamBody.isLocked?.() ?? false) || (streamBody.isDisturbed?.() ?? false))) {
+      throw new TypeError('Cannot clone an unreadable stream body');
+    }
+
     if (this.bodyBytes === null) {
       if (this.body === null) {
         return null;
       }
 
-      const streamBody = this.getStreamLike();
       if (streamBody === null) {
         return null;
       }
@@ -192,6 +214,10 @@ export class BodyContainer {
       return false;
     }
     return this.getStreamLike()?.isDisturbed?.() ?? false;
+  }
+
+  isEmptyFormDataBody(): boolean {
+    return this.emptyFormDataBody;
   }
 
   private markBufferedBodyConsumed(): void {
@@ -316,8 +342,12 @@ export class BodyContainer {
     };
 
     if (!this.signal) {
-      const readResult = await reader.read();
-      return toSafeReadResult(readResult);
+      try {
+        const readResult = await reader.read();
+        return toSafeReadResult(readResult);
+      } catch (error) {
+        throw normalizeStreamReadError(error);
+      }
     }
 
     if (this.signal.aborted) {
@@ -357,7 +387,7 @@ export class BodyContainer {
             return;
           }
           settled = true;
-          reject(error);
+          reject(normalizeStreamReadError(error));
         })
         .finally(() => {
           this.signal?.removeEventListener('abort', onAbort);

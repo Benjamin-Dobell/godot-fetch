@@ -45,14 +45,82 @@ function normalizeHeaderValue(value: string, mode: 'response' | 'strict'): strin
   return text.replace(/^[\t\r\n ]+|[\t\r\n ]+$/g, '');
 }
 
+type HeadersIteratorKind = 'entries' | 'keys' | 'values';
+type HeadersIteratorValue = [string, string] | string;
+type HeadersIterator = IterableIterator<HeadersIteratorValue> & {
+  headers: Headers;
+  index: number;
+  kind: HeadersIteratorKind;
+};
+
+const IteratorPrototype = Object.getPrototypeOf(Object.getPrototypeOf([][Symbol.iterator]()));
+const HeadersIteratorPrototype = Object.create(IteratorPrototype);
+
+Object.defineProperty(HeadersIteratorPrototype, 'next', {
+  configurable: true,
+  enumerable: true,
+  writable: true,
+  value(this: HeadersIterator): IteratorResult<HeadersIteratorValue> {
+    const entries = this.headers.sortedEntries();
+
+    if (this.index >= entries.length) {
+      return {
+        done: true,
+        value: undefined,
+      };
+    }
+
+    const [name, value] = entries[this.index++]!;
+
+    if (this.kind === 'keys') {
+      return {
+        done: false,
+        value: name,
+      };
+    }
+
+    if (this.kind === 'values') {
+      return {
+        done: false,
+        value,
+      };
+    }
+
+    return {
+      done: false,
+      value: [name, value],
+    };
+  },
+});
+
+Object.defineProperty(HeadersIteratorPrototype, Symbol.iterator, {
+  configurable: true,
+  enumerable: false,
+  writable: true,
+  value(this: HeadersIterator): HeadersIterator {
+    return this;
+  },
+});
+
+function createHeadersIterator(
+  headers: Headers,
+  kind: HeadersIteratorKind,
+): IterableIterator<HeadersIteratorValue> {
+  const iterator = Object.create(HeadersIteratorPrototype) as HeadersIterator;
+  iterator.headers = headers;
+  iterator.index = 0;
+  iterator.kind = kind;
+  return iterator;
+}
+
 export class Headers {
   private readonly map = new Map<string, { originalName: string; values: string[] }>();
-  private readonly guard: 'none' | 'request';
+  private guard: 'none' | 'request' | 'response' | 'immutable';
   private readonly valueValidationMode: 'response' | 'strict';
 
   constructor(
     init?: HeadersInit,
-    guard: 'none' | 'request' = 'none',
+    guard: 'none' | 'request' | 'response' | 'immutable' = 'none',
     valueValidationMode: 'response' | 'strict' = 'strict',
   ) {
     this.guard = guard;
@@ -113,7 +181,7 @@ export class Headers {
       assertValidHeaderValue(headerValue);
     }
 
-    if (!this.canSetHeader(name, value)) {
+    if (!this.canSetHeader(name, headerValue)) {
       return;
     }
 
@@ -131,6 +199,9 @@ export class Headers {
 
   delete(name: string): void {
     assertValidHeaderName(name);
+    if (this.guard === 'immutable') {
+      throw new TypeError('Headers are immutable');
+    }
     this.map.delete(normalizeHeaderName(String(name)));
   }
 
@@ -167,7 +238,7 @@ export class Headers {
       assertValidHeaderValue(headerValue);
     }
 
-    if (!this.canSetHeader(name, value)) {
+    if (!this.canSetHeader(name, headerValue)) {
       return;
     }
 
@@ -180,38 +251,53 @@ export class Headers {
   }
 
   forEach(callback: (value: string, key: string, parent: Headers) => void): void {
-    for (const [, entry] of this.map.entries()) {
-      callback(entry.values.join(', '), entry.originalName, this);
+    for (const [key, value] of this.entries()) {
+      callback(value, key, this);
     }
   }
 
-  *entries(): IterableIterator<[string, string]> {
-    for (const [, entry] of this.map.entries()) {
-      yield [entry.originalName, entry.values.join(', ')];
-    }
+  entries(): IterableIterator<[string, string]> {
+    return createHeadersIterator(this, 'entries') as IterableIterator<[string, string]>;
   }
 
-  *keys(): IterableIterator<string> {
-    for (const [, entry] of this.map.entries()) {
-      yield entry.originalName;
-    }
+  keys(): IterableIterator<string> {
+    return createHeadersIterator(this, 'keys') as IterableIterator<string>;
   }
 
-  *values(): IterableIterator<string> {
-    for (const [, entry] of this.map.entries()) {
-      yield entry.values.join(', ');
-    }
+  values(): IterableIterator<string> {
+    return createHeadersIterator(this, 'values') as IterableIterator<string>;
+  }
+
+  rawEntries(): [string, string][] {
+    return Array.from(this.map.values()).map((entry) => [
+      entry.originalName,
+      entry.values.join(', '),
+    ]);
   }
 
   [Symbol.iterator](): IterableIterator<[string, string]> {
     return this.entries();
   }
 
+  makeImmutable(): void {
+    this.guard = 'immutable';
+  }
+
   private canSetHeader(name: string, value: string): boolean {
+    if (this.guard === 'immutable') {
+      throw new TypeError('Headers are immutable');
+    }
+
+    const normalized = normalizeHeaderName(String(name));
+
+    if (this.guard === 'response') {
+      return !FORBIDDEN_RESPONSE_HEADERS.has(normalized);
+    }
+
     if (this.guard !== 'request') {
       return true;
     }
-    const normalized = normalizeHeaderName(String(name));
+
     if (normalized.startsWith('proxy-') || normalized.startsWith('sec-')) {
       return false;
     }
@@ -223,6 +309,26 @@ export class Headers {
     }
     return true;
   }
+
+  sortedEntries(): [string, string][] {
+    const entries: [string, string][] = [];
+
+    for (const key of Array.from(this.map.keys()).sort()) {
+      const entry = this.map.get(key);
+      if (!entry) {
+        continue;
+      }
+      if (key === 'set-cookie') {
+        for (const value of entry.values) {
+          entries.push([key, value]);
+        }
+      } else {
+        entries.push([key, entry.values.join(', ')]);
+      }
+    }
+
+    return entries;
+  }
 }
 
 const FORBIDDEN_REQUEST_HEADERS = new Set([
@@ -232,6 +338,8 @@ const FORBIDDEN_REQUEST_HEADERS = new Set([
   'access-control-request-method',
   'access-control-request-private-network',
   'connection',
+  'cookie',
+  'cookie2',
   'content-length',
   'date',
   'dnt',
@@ -245,6 +353,12 @@ const FORBIDDEN_REQUEST_HEADERS = new Set([
   'transfer-encoding',
   'upgrade',
   'via',
+  'set-cookie',
+]);
+
+const FORBIDDEN_RESPONSE_HEADERS = new Set([
+  'set-cookie',
+  'set-cookie2',
 ]);
 
 const FORBIDDEN_METHOD_OVERRIDE_HEADERS = new Set([

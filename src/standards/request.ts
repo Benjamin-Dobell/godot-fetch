@@ -29,6 +29,7 @@ export interface RequestInit {
   keepalive?: boolean;
   method?: string;
   mode?: RequestMode;
+  priority?: string;
   referrer?: string;
   referrerPolicy?: ReferrerPolicy;
   redirect?: RequestRedirect;
@@ -44,6 +45,7 @@ const ALLOWED_CREDENTIALS = new Set(['include', 'omit', 'same-origin']);
 const ALLOWED_CACHES = new Set(['default', 'force-cache', 'no-cache', 'no-store', 'only-if-cached', 'reload']);
 const ALLOWED_REDIRECTS = new Set(['error', 'follow', 'manual']);
 const ALLOWED_REFERRER_POLICIES = new Set(['', 'no-referrer', 'origin', 'origin-when-cross-origin']);
+const ALLOWED_PRIORITIES = new Set(['high', 'low', 'auto']);
 
 function parseAllowedString<T extends string>(
   value: string,
@@ -275,6 +277,7 @@ export class Request {
 
   constructor(input: RequestInfo, init: RequestInit = {}) {
     const source = input instanceof Request ? input : null;
+    const initRequest = init instanceof Request ? init : null;
 
     if (Object.prototype.hasOwnProperty.call(init, 'window') && init.window !== null) {
       throw new TypeError('RequestInit.window must be null');
@@ -284,6 +287,15 @@ export class Request {
 
     if (hasCredentialInUrl(this._url)) {
       throw new TypeError('Request URL must not contain credentials');
+    }
+
+    if (Object.prototype.hasOwnProperty.call(init, 'priority')) {
+      parseAllowedString(init.priority ?? '', ALLOWED_PRIORITIES, 'Invalid request priority');
+    }
+
+    const hasDuplex = Object.prototype.hasOwnProperty.call(init, 'duplex');
+    if (hasDuplex && init.duplex !== 'half') {
+      throw new TypeError('Invalid request duplex');
     }
 
     this._method = normalizeMethod(init.method ?? source?.method ?? 'GET');
@@ -319,7 +331,7 @@ export class Request {
       'Invalid request redirect mode',
     );
 
-    this._keepalive = init.keepalive ?? source?.keepalive ?? false;
+    this._keepalive = Boolean(init.keepalive ?? source?.keepalive ?? false);
 
     if (this._mode === 'navigate') {
       throw new TypeError('navigate mode is not allowed');
@@ -346,12 +358,19 @@ export class Request {
       : new Headers(source ? source.headers : undefined, 'request');
 
     if (init.headers) {
-      new Headers(init.headers).forEach((value, key) => this._headers.set(key, value));
+      const initHeaders = init.headers instanceof Headers
+        ? init.headers
+        : new Headers(init.headers);
+      for (const [key, value] of initHeaders.rawEntries()) {
+        this._headers.set(key, value);
+      }
     }
 
-    const normalizedInitBody = typeof init.body !== 'undefined'
-      ? normalizeRequestBody(init.body)
-      : undefined;
+    const normalizedInitBody = initRequest !== null
+      ? initRequest.bodyContainer.cloneBody()
+      : (typeof init.body !== 'undefined'
+        ? normalizeRequestBody(init.body)
+        : undefined);
 
     const bodyForMethodValidation = typeof normalizedInitBody !== 'undefined'
       ? normalizedInitBody
@@ -371,7 +390,20 @@ export class Request {
 
     const body = normalizeRequestBody(sourceBody);
 
-    this._bodySourceIsStream = isReadableStreamLike(body);
+    const bodyIsStream = isReadableStreamLike(body);
+    this._bodySourceIsStream = bodyIsStream;
+
+    if (bodyIsStream) {
+      if ((body.isLocked?.() ?? false) || (body.isDisturbed?.() ?? false)) {
+        throw new TypeError('ReadableStream body is locked or disturbed');
+      }
+      if (typeof normalizedInitBody !== 'undefined' && initRequest === null && !hasDuplex) {
+        throw new TypeError('ReadableStream request body requires duplex');
+      }
+      if (this._keepalive) {
+        throw new TypeError('ReadableStream request body cannot be used with keepalive');
+      }
+    }
 
     const inferredType = inferBodyContentType(body);
 
@@ -408,10 +440,29 @@ export class Request {
       throw new TypeError('Cannot clone a request with consumed body');
     }
 
-    return new Request(this);
+    return new Request(this.url, {
+      body: this.bodyContainer.cloneBody(),
+      cache: this.cache,
+      credentials: this.credentials,
+      duplex: 'half',
+      headers: this.headers,
+      integrity: this.integrity,
+      keepalive: this.keepalive,
+      method: this.method,
+      mode: this.mode,
+      redirect: this.redirect,
+      referrer: this.referrer,
+      referrerPolicy: this.referrerPolicy,
+      signal: this.signal,
+    });
   }
 
   async formData(): Promise<FormData> {
+    if (this.bodyContainer.isEmptyFormDataBody()) {
+      await this.text();
+      return new FormData();
+    }
+
     return parseFormDataFromBody(this.headers.get('content-type'), await this.text());
   }
 

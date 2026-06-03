@@ -139,10 +139,6 @@ export function getNeverAbortSignal(): AbortSignal {
   return neverAbortSignal;
 }
 
-export function isNeverAbortSignal(signal: undefined | AbortSignal): boolean {
-  return signal?.isNeverSignal() === true;
-}
-
 export function followAbortSignal(source: null | undefined | AbortSignal): AbortSignal | undefined {
   if (!source) {
     return undefined;

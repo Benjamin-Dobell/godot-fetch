@@ -1,4 +1,4 @@
-import { HTTPClient, is_instance_valid } from 'godot';
+import { Node, is_instance_valid } from 'godot';
 import { fetch as godotFetch } from 'godot-fetch';
 
 export type BridgeSanityOptions = {
@@ -8,10 +8,10 @@ export type BridgeSanityOptions = {
 };
 
 type BridgeSnapshot = {
-  clientCloseType: string;
-  clientGetStatusType: string;
   isInstanceValidType: string;
   label: string;
+  nodeFreeType: string;
+  nodeGetNameType: string;
 };
 
 export type BridgeSanityResult = {
@@ -23,38 +23,38 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function sample(client: HTTPClient, label: string): BridgeSnapshot {
+function sample(node: Node, label: string): BridgeSnapshot {
   return {
     label,
     isInstanceValidType: typeof is_instance_valid,
-    clientCloseType: typeof client.close,
-    clientGetStatusType: typeof client.get_status,
+    nodeFreeType: typeof node.free,
+    nodeGetNameType: typeof node.get_name,
   };
 }
 
 export async function runBridgeSanity(options: BridgeSanityOptions): Promise<BridgeSanityResult> {
   const snapshots: BridgeSnapshot[] = [];
   const failures: string[] = [];
-  const client = new HTTPClient();
+  const node = new Node();
 
   const record = (label: string) => {
-    const snapshot = sample(client, label);
+    const snapshot = sample(node, label);
     snapshots.push(snapshot);
     if (snapshot.isInstanceValidType !== 'function') {
       failures.push(`${label}: typeof is_instance_valid=${snapshot.isInstanceValidType}`);
     }
-    if (snapshot.clientCloseType !== 'function') {
-      failures.push(`${label}: typeof client.close=${snapshot.clientCloseType}`);
+    if (snapshot.nodeFreeType !== 'function') {
+      failures.push(`${label}: typeof node.free=${snapshot.nodeFreeType}`);
     }
-    if (snapshot.clientGetStatusType !== 'function') {
-      failures.push(`${label}: typeof client.get_status=${snapshot.clientGetStatusType}`);
+    if (snapshot.nodeGetNameType !== 'function') {
+      failures.push(`${label}: typeof node.get_name=${snapshot.nodeGetNameType}`);
     }
   };
 
   record('initial');
   if (typeof is_instance_valid === 'function') {
-    if (!is_instance_valid(client)) {
-      failures.push('initial: is_instance_valid(client) returned false');
+    if (!is_instance_valid(node)) {
+      failures.push('initial: is_instance_valid(node) returned false');
     }
   }
 
@@ -76,8 +76,11 @@ export async function runBridgeSanity(options: BridgeSanityOptions): Promise<Bri
     }
   }
 
-  client.close();
-  record('after-close');
+  record('before-free');
+  node.free();
+  if (typeof is_instance_valid === 'function' && is_instance_valid(node)) {
+    failures.push('after-free: is_instance_valid(node) returned true');
+  }
 
   return { snapshots, failures };
 }

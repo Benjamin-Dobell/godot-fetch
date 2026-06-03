@@ -58,7 +58,7 @@ export type ReadableStreamReaderLike = {
 };
 
 export type ReadableStreamLike = {
-  cancel?: (reason?: unknown) => void;
+  cancel?: (reason?: unknown) => Promise<void> | void;
   getReader: () => ReadableStreamReaderLike;
   isDisturbed?: () => boolean;
   isLocked?: () => boolean;
@@ -89,13 +89,11 @@ function cloneStreamChunk(value: unknown): unknown {
   }
 
   if (ArrayBuffer.isView(value)) {
-    const sourceBytes = new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
-    const clonedBytes = new Uint8Array(sourceBytes.byteLength);
-    clonedBytes.set(sourceBytes);
-    const clonedBuffer = clonedBytes.buffer;
+    const sourceBuffer = value.buffer as ArrayBuffer;
+    const clonedBuffer = sourceBuffer.slice(0);
 
     if (value instanceof DataView) {
-      return new DataView(clonedBuffer, 0, value.byteLength);
+      return new DataView(clonedBuffer, value.byteOffset, value.byteLength);
     }
 
     const constructor = value.constructor as {
@@ -105,10 +103,10 @@ function cloneStreamChunk(value: unknown): unknown {
     const typedArrayValue = value as unknown as { length?: number };
 
     if (typeof typedArrayValue.length !== 'number') {
-      return new constructor(clonedBuffer, 0);
+      return new constructor(clonedBuffer, value.byteOffset);
     }
 
-    return new constructor(clonedBuffer, 0, typedArrayValue.length);
+    return new constructor(clonedBuffer, value.byteOffset, typedArrayValue.length);
   }
 
   return value;
@@ -227,8 +225,7 @@ class SimpleReadableStreamDefaultReader {
       return Promise.resolve();
     }
     this.released = true;
-    this.stream.cancel(reason);
-    return Promise.resolve();
+    return this.stream.cancel(reason);
   }
 }
 
@@ -241,7 +238,7 @@ export class ReadableStream {
     enqueue: (value: unknown) => void;
     error: (reason?: unknown) => void;
   }) => void | Promise<void>;
-  private readonly cancelAlgorithm?: (reason?: unknown) => void;
+  private readonly cancelAlgorithm?: (reason?: unknown) => unknown | Promise<unknown>;
   private readonly queue: unknown[] = [];
   private readonly pendingReads: Array<{
     reject: (reason?: unknown) => void;
@@ -254,7 +251,7 @@ export class ReadableStream {
   private resolveClosed!: () => void;
 
   constructor(source?: {
-    cancel?: (reason?: unknown) => void;
+    cancel?: (reason?: unknown) => unknown | Promise<unknown>;
     pull?: (controller: { close: () => void; enqueue: (value: unknown) => void; error: (reason?: unknown) => void }) => void | Promise<void>;
     start?: (controller: { close: () => void; enqueue: (value: unknown) => void; error: (reason?: unknown) => void }) => void;
   }) {
@@ -317,6 +314,15 @@ export class ReadableStream {
     }
   }
 
+  pipeThrough<T extends { readable: unknown; writable: {
+    abort?: (reason?: unknown) => unknown | Promise<unknown>;
+    close?: () => unknown | Promise<unknown>;
+    write?: (chunk: unknown) => unknown | Promise<unknown>;
+  } }>(transform: T): T['readable'] {
+    void this.pipeTo(transform.writable);
+    return transform.readable;
+  }
+
   isDisturbed(): boolean {
     return this.disturbed;
   }
@@ -329,9 +335,9 @@ export class ReadableStream {
     return this.streamClosedPromise;
   }
 
-  cancel(reason?: unknown): void {
+  async cancel(reason?: unknown): Promise<void> {
     this.disturbed = true;
-    this.cancelAlgorithm?.(reason);
+    await this.cancelAlgorithm?.(reason);
     this.close();
   }
 

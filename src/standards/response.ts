@@ -5,7 +5,7 @@ import { parseFormDataFromBody } from './form-data-utils';
 import { Headers } from './headers';
 import { ReadableStream, isReadableStreamLike } from './stream';
 import type { BodyInit, HeadersInit, ResponseType } from './types';
-import { URLSearchParams } from './url';
+import { URL, URLSearchParams } from './url';
 import { BodyContainer } from './body-container';
 
 export interface ResponseInit {
@@ -15,10 +15,13 @@ export interface ResponseInit {
 }
 
 type ResponseInternalInit = {
+  allowStatusZero?: boolean;
+  immutableHeaders?: boolean;
   redirected?: boolean;
   signal?: AbortSignal;
 };
 
+const NULL_BODY_STATUSES = new Set([204, 205, 304]);
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
 
 function inferBodyContentType(body: null | BodyInit): null | string {
@@ -45,6 +48,29 @@ function inferBodyContentType(body: null | BodyInit): null | string {
   return null;
 }
 
+function assertValidStatusText(statusText: string): void {
+  for (let index = 0; index < statusText.length; index += 1) {
+    if (statusText.charCodeAt(index) > 0xff) {
+      throw new TypeError('Invalid response statusText');
+    }
+  }
+
+  if (/[\r\n]/.test(statusText)) {
+    throw new TypeError('Invalid response statusText');
+  }
+}
+
+function resolveRedirectUrl(url: string): string {
+  try {
+    const base = globalThis.location?.href;
+    return typeof base === 'string' && base.length > 0
+      ? new URL(url, base).toString()
+      : new URL(url).toString();
+  } catch {
+    throw new TypeError('Invalid redirect URL');
+  }
+}
+
 export class Response {
   readonly headers: Headers;
   readonly status: number;
@@ -67,13 +93,23 @@ export class Response {
   constructor(body: null | BodyInit = null, init: ResponseInit = {}, internal: ResponseInternalInit = {}) {
     const status = init.status ?? 200;
 
-    if (status !== 0 && (status < 200 || status > 599)) {
+    if (
+      !Number.isInteger(status)
+      || (status === 0 ? !internal.allowStatusZero : (status < 200 || status > 599))
+    ) {
       throw new RangeError('Invalid response status');
     }
 
+    const statusText = init.statusText ?? '';
+    assertValidStatusText(statusText);
+
+    if (body !== null && NULL_BODY_STATUSES.has(status)) {
+      throw new TypeError('Response status must not have a body');
+    }
+
     this.status = status;
-    this.statusText = init.statusText ?? '';
-    this.headers = new Headers(init.headers, 'none', 'response');
+    this.statusText = statusText;
+    this.headers = new Headers(init.headers, 'response', 'response');
 
     const inferredType = inferBodyContentType(body);
 
@@ -86,33 +122,45 @@ export class Response {
     this.type = 'default';
     this.url = '';
 
-    const bodyAllowed = this.status !== 204 && this.status !== 205 && this.status !== 304;
-
-    if (bodyAllowed && isReadableStreamLike(body) && ((body.isLocked?.() ?? false) || (body.isDisturbed?.() ?? false))) {
+    if (isReadableStreamLike(body) && ((body.isLocked?.() ?? false) || (body.isDisturbed?.() ?? false))) {
       throw new TypeError('ReadableStream body is locked or disturbed');
     }
 
+    if (internal.immutableHeaders) {
+      this.headers.makeImmutable();
+    }
+
     this.bodyContainer = new BodyContainer(
-      bodyAllowed ? body : null,
+      body,
       internal.signal,
       () => this.headers.get('content-type'),
     );
   }
 
   static error(): Response {
-    const response = new Response(null, { status: 0, statusText: '' });
+    const response = new Response(null, { status: 0, statusText: '' }, {
+      allowStatusZero: true,
+      immutableHeaders: true,
+    });
     response.type = 'error';
     return response;
   }
 
   static json(data: unknown, init: ResponseInit = {}): Response {
     const headers = new Headers(init.headers);
+    let body: string;
+
+    const encoded = JSON.stringify(data);
+    if (typeof encoded !== 'string') {
+      throw new TypeError('Data is not JSON serializable');
+    }
+    body = encoded;
 
     if (!headers.has('content-type')) {
       headers.set('content-type', 'application/json');
     }
 
-    return new Response(JSON.stringify(data), {
+    return new Response(body, {
       ...init,
       headers,
     });
@@ -123,9 +171,14 @@ export class Response {
       throw new RangeError('Invalid redirect status');
     }
 
-    const response = new Response(null, { status });
-    response.headers.set('location', url);
-    return response;
+    return new Response(null, {
+      headers: {
+        location: resolveRedirectUrl(url),
+      },
+      status,
+    }, {
+      immutableHeaders: true,
+    });
   }
 
   arrayBuffer(): Promise<ArrayBuffer> {
@@ -153,6 +206,8 @@ export class Response {
       headers: this.headers,
       status: this.status,
       statusText: this.statusText,
+    }, {
+      allowStatusZero: this.status === 0,
     });
 
     cloned.type = this.type;
@@ -162,6 +217,11 @@ export class Response {
   }
 
   async formData(): Promise<FormData> {
+    if (this.bodyContainer.isEmptyFormDataBody()) {
+      await this.text();
+      return new FormData();
+    }
+
     return parseFormDataFromBody(this.headers.get('content-type'), await this.text());
   }
 

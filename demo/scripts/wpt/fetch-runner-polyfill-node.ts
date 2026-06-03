@@ -16,7 +16,6 @@ import {
   URLSearchParams,
   WritableStream,
 } from 'godot-fetch';
-import { runBridgeSanity } from '../bridge-sanity-core';
 import { parseArgs, runWptSuite } from './fetch-wpt-runner.js';
 const WPT_WEB_CONFIG_PATH = 'res://.wpt-web-config.json';
 
@@ -27,10 +26,6 @@ type SmokeConfig = {
   webStreamExpectedBytes?: number;
   webStreamSmoke?: boolean;
   webStreamUrl?: string;
-  webBridgeSmoke?: boolean;
-  webBridgeUrl?: string;
-  webBridgeIterations?: number;
-  webBridgeWaitMs?: number;
 };
 
 function parseQueryValue(query: string, key: string): null | string {
@@ -96,18 +91,6 @@ function readSmokeConfig(): SmokeConfig {
   }
   if (typeof parsed.webStreamExpectedBytes === 'number') {
     config.webStreamExpectedBytes = parsed.webStreamExpectedBytes;
-  }
-  if (parsed.webBridgeSmoke === true) {
-    config.webBridgeSmoke = true;
-  }
-  if (typeof parsed.webBridgeUrl === 'string') {
-    config.webBridgeUrl = parsed.webBridgeUrl;
-  }
-  if (typeof parsed.webBridgeIterations === 'number') {
-    config.webBridgeIterations = parsed.webBridgeIterations;
-  }
-  if (typeof parsed.webBridgeWaitMs === 'number') {
-    config.webBridgeWaitMs = parsed.webBridgeWaitMs;
   }
   return config;
 }
@@ -193,26 +176,6 @@ async function runStreamSmoke(config: SmokeConfig): Promise<void> {
   console.log(`[WEB_STREAM_SMOKE] PASS bytes=${String(bytes)}`);
 }
 
-async function runBridgeSmoke(config: SmokeConfig): Promise<void> {
-  const result = await runBridgeSanity({
-    fetchUrl: config.webBridgeUrl ?? readQueryParam('web_bridge_url'),
-    fetchIterations: Number.parseInt(
-      readQueryParam('web_bridge_iterations')
-      ?? (typeof config.webBridgeIterations === 'number' ? String(config.webBridgeIterations) : '5'),
-      10,
-    ),
-    waitMs: Number.parseInt(
-      readQueryParam('web_bridge_wait_ms')
-      ?? (typeof config.webBridgeWaitMs === 'number' ? String(config.webBridgeWaitMs) : '25'),
-      10,
-    ),
-  });
-  if (result.failures.length > 0) {
-    throw new Error(`[WEB_BRIDGE_SMOKE] failures=${JSON.stringify(result.failures)} snapshots=${JSON.stringify(result.snapshots)}`);
-  }
-  console.log(`[WEB_BRIDGE_SMOKE] PASS snapshots=${JSON.stringify(result.snapshots)}`);
-}
-
 export default class FetchRunnerPolyfillNode extends Node {
   override _ready(): void {
     console.log('[WEB_SMOKE_MODE] _ready entered');
@@ -225,17 +188,13 @@ export default class FetchRunnerPolyfillNode extends Node {
       const config = readSmokeConfig();
       const httpSmoke = readQueryParam('web_http_smoke') === '1' || config.webHttpSmoke === true;
       const streamSmoke = readQueryParam('web_stream_smoke') === '1' || config.webStreamSmoke === true;
-      const bridgeSmoke = readQueryParam('web_bridge_smoke') === '1' || config.webBridgeSmoke === true;
-      console.log(`[WEB_SMOKE_MODE] selected http=${String(httpSmoke)} stream=${String(streamSmoke)} bridge=${String(bridgeSmoke)}`);
-      if (httpSmoke || streamSmoke || bridgeSmoke) {
+      console.log(`[WEB_SMOKE_MODE] selected http=${String(httpSmoke)} stream=${String(streamSmoke)}`);
+      if (httpSmoke || streamSmoke) {
         if (httpSmoke) {
           await runHttpSmoke(config);
         }
         if (streamSmoke) {
           await runStreamSmoke(config);
-        }
-        if (bridgeSmoke) {
-          await runBridgeSmoke(config);
         }
         this.get_tree()?.quit(0);
         return;

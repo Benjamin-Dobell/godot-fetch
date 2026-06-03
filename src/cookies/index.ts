@@ -6,7 +6,7 @@ import { createUnsupportedWebCookieStore } from './web-unsupported-store';
 const isWebRuntime = OS.has_feature('web');
 const defaultStore: CookieStore = isWebRuntime ? createUnsupportedWebCookieStore() : createMemoryCookieStore();
 
-let permittedDomains: string[] = ['localhost'];
+let permittedDomains: string[] = [];
 let store: CookieStore = defaultStore;
 
 export function setCookiePermittedDomains(domains: string[]) {

@@ -2,7 +2,6 @@ import { Marshalls, OS, PackedByteArray } from 'godot.lib.api';
 import { HttpAbortError, HttpResponseError, submit, type HttpHeaders, type HttpResponse } from '../http';
 import {
   createAbortError,
-  isNeverAbortSignal,
   normalizeAbortRejectionReason,
   type AbortSignal,
 } from './abort';
@@ -16,6 +15,8 @@ import { URL, URLSearchParams, getBlobFromObjectUrl } from './url';
 import { Request, type RequestInfo, type RequestInit } from './request';
 import { Response } from './response';
 import { markAsGodotFetchImplementation } from '../utils/install';
+import { getHttpCache } from '../caching';
+import type { HttpCache, HttpCacheRevalidation, HttpCacheRequest, HttpCacheResponse } from '../caching/store';
 
 export type Fetch = (input: RequestInfo | URL, init?: FetchRequestInit) => Promise<Response>;
 
@@ -62,13 +63,15 @@ const REDIRECT_REWRITTEN_BODY_HEADERS = [
 ];
 
 const MAX_REDIRECTS = 20;
-
+const NULL_BODY_STATUSES = new Set([204, 205, 304]);
+const CACHE_READ_REQUEST_CACHES = new Set(['default', 'force-cache', 'no-cache', 'only-if-cached']);
 const BAD_PORTS = new Set([
-  1, 7, 9, 11, 13, 15, 17, 19, 20, 21, 22, 23, 25, 37, 42, 43, 53, 77, 79, 87,
-  95, 101, 102, 103, 104, 109, 110, 111, 113, 115, 117, 119, 123, 135, 139, 143,
-  179, 389, 427, 465, 512, 513, 514, 515, 526, 530, 531, 532, 540, 548, 554, 556,
-  563, 587, 601, 636, 989, 990, 993, 995, 1719, 1720, 1723, 2049, 3659, 4045,
-  5060, 5061, 6000, 6566, 6665, 6666, 6667, 6668, 6669, 6679, 6697, 10080,
+  0, 1, 7, 9, 11, 13, 15, 17, 19, 20, 21, 22, 23, 25, 37, 42, 43, 53, 69, 77, 79,
+  87, 95, 101, 102, 103, 104, 109, 110, 111, 113, 115, 117, 119, 123, 135, 137,
+  139, 143, 161, 179, 389, 427, 465, 512, 513, 514, 515, 526, 530, 531, 532, 540,
+  548, 554, 556, 563, 587, 601, 636, 989, 990, 993, 995, 1719, 1720, 1723, 2049,
+  3659, 4045, 4190, 5060, 5061, 6000, 6566, 6665, 6666, 6667, 6668, 6669, 6679,
+  6697, 10080,
 ]);
 
 const isWebRuntime = OS.has_feature('web');
@@ -117,12 +120,36 @@ function resolveUrl(rawUrl: string): string {
   return new URL(rawUrl, base).toString();
 }
 
-function resolveRelativeRedirect(locationHeader: string, currentUrl: string): string {
-  if (/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(locationHeader)) {
-    return locationHeader;
+function percentEncodeLocationHeaderBytes(locationHeader: string): string {
+  let encoded = '';
+
+  for (const character of locationHeader) {
+    const codePoint = character.codePointAt(0)!;
+
+    if (codePoint <= 0x7F) {
+      encoded += character;
+      continue;
+    }
+
+    if (codePoint <= 0xFF) {
+      encoded += `%${codePoint.toString(16).toUpperCase().padStart(2, '0')}`;
+      continue;
+    }
+
+    encoded += encodeURIComponent(character);
   }
 
-  return new URL(locationHeader, currentUrl).toString();
+  return encoded;
+}
+
+function resolveRelativeRedirect(locationHeader: string, currentUrl: string): string {
+  const encodedLocation = percentEncodeLocationHeaderBytes(locationHeader);
+
+  if (/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(encodedLocation)) {
+    return encodedLocation;
+  }
+
+  return new URL(encodedLocation, currentUrl).toString();
 }
 
 function containsForbiddenMethodToken(value: string): boolean {
@@ -240,17 +267,26 @@ function resolveReferrerHeader(input: RequestInfo | URL, init: FetchRequestInit 
 }
 
 function buildHeaders(input: RequestInfo | URL, init: FetchRequestInit | undefined, resolvedUrl: string): Headers {
-  const headers = new Headers(input instanceof Request ? input.headers : undefined);
+  const headers = new Headers();
   const method = (input instanceof Request ? input.method : (init?.method ?? 'GET')).toUpperCase();
 
+  if (input instanceof Request) {
+    for (const [key, value] of input.headers.rawEntries()) {
+      headers.set(key, value);
+    }
+  }
+
   if (init?.headers) {
-    new Headers(init.headers).forEach((value, key) => {
+    const initHeaders = init.headers instanceof Headers
+      ? init.headers
+      : new Headers(init.headers);
+    for (const [key, value] of initHeaders.rawEntries()) {
       if (isForbiddenRequestHeader(key, value)) {
-        return;
+        continue;
       }
 
       headers.set(key, value);
-    });
+    }
   }
 
   if (!headers.has('accept')) {
@@ -428,10 +464,58 @@ function isBadPort(urlText: string): boolean {
 
 function toHeaderRecord(headers: Headers): HttpHeaders {
   const out: HttpHeaders = {};
-  headers.forEach((value, key) => {
+  for (const [key, value] of headers.rawEntries()) {
     out[key] = value;
-  });
+  }
   return out;
+}
+
+function copyUint8Array(bytes: Uint8Array): Uint8Array {
+  const copy = new Uint8Array(bytes.byteLength);
+  copy.set(bytes);
+  return copy;
+}
+
+async function toHttpCacheRequestBody(body: null | FetchBodyInit): Promise<null | Uint8Array> {
+  if (body === null) {
+    return null;
+  }
+
+  if (body instanceof PackedByteArray) {
+    return copyUint8Array(new Uint8Array(body.to_array_buffer()));
+  }
+
+  return copyUint8Array(await bodyToBytes(body));
+}
+
+async function buildHttpCacheRequest(
+  request: Request,
+  method: string,
+  resolvedUrl: string,
+  headers: Headers,
+  body: null | FetchBodyInit,
+): Promise<HttpCacheRequest> {
+  return {
+    method,
+    url: resolvedUrl,
+    headers: toHeaderRecord(headers),
+    body: await toHttpCacheRequestBody(body),
+    cache: request.cache,
+    credentials: request.credentials,
+    redirect: request.redirect,
+  };
+}
+
+function canReadFromHttpCache(request: Request, method: string, body: null | FetchBodyInit): boolean {
+  return method.toUpperCase() === 'GET'
+    && body === null
+    && CACHE_READ_REQUEST_CACHES.has(request.cache);
+}
+
+function canWriteToHttpCache(request: Request, method: string, body: null | FetchBodyInit): boolean {
+  return method.toUpperCase() === 'GET'
+    && body === null
+    && request.cache !== 'no-store';
 }
 
 function stripFragment(url: string): string {
@@ -451,6 +535,14 @@ function normalizeResponseUrl(url: string): string {
     return parsed.toString();
   } catch {
     return stripFragment(url);
+  }
+}
+
+function isCrossOriginRedirect(fromUrl: string, toUrl: string): boolean {
+  try {
+    return new URL(fromUrl).origin !== new URL(toUrl).origin;
+  } catch {
+    return false;
   }
 }
 
@@ -474,6 +566,89 @@ function toHeaders(headers: HttpHeaders): Headers {
     }
   }
   return out;
+}
+
+function buildCachedResponse(
+  cachedResponse: HttpCacheResponse,
+  resolvedUrl: string,
+  method: string,
+  signal?: AbortSignal,
+): Response {
+  const status = cachedResponse.status;
+  const upperMethod = method.toUpperCase();
+  const bodyAllowed = upperMethod !== 'HEAD' && !NULL_BODY_STATUSES.has(status);
+  const body = bodyAllowed ? (cachedResponse.body ?? null) : null;
+  const response = new Response(body, {
+    headers: toHeaders(cachedResponse.headers ?? {}),
+    status,
+    statusText: cachedResponse.statusText ?? '',
+  }, {
+    immutableHeaders: true,
+    signal,
+  });
+
+  response.type = 'basic';
+  response.url = normalizeResponseUrl(resolvedUrl);
+  return response;
+}
+
+function buildCachedRevalidatedResponse(
+  revalidatedResponse: HttpCacheResponse,
+  resolvedUrl: string,
+  method: string,
+  signal?: AbortSignal,
+): Response {
+  return buildCachedResponse(revalidatedResponse, resolvedUrl, method, signal);
+}
+
+function applyHttpCacheRequestHeaders(headers: Headers, cacheHeaders: HttpHeaders): void {
+  for (const [key, value] of Object.entries(cacheHeaders)) {
+    headers.delete(key);
+
+    if (Array.isArray(value)) {
+      for (const item of value) {
+        headers.append(key, item);
+      }
+    } else {
+      headers.set(key, value);
+    }
+  }
+}
+
+async function toHttpCacheResponse(response: Response): Promise<HttpCacheResponse> {
+  return {
+    status: response.status,
+    statusText: response.statusText,
+    headers: toHeaderRecord(response.headers),
+    body: NULL_BODY_STATUSES.has(response.status) ? null : await response.clone().bytes(),
+  };
+}
+
+function putResponseInHttpCache(
+  httpCache: HttpCache,
+  request: Request,
+  httpCacheRequest: HttpCacheRequest,
+  method: string,
+  body: null | FetchBodyInit,
+  response: Response,
+): void {
+  if (!httpCache.put || !canWriteToHttpCache(request, method, body) || response.status === 304) {
+    return;
+  }
+
+  let cacheResponse: Response;
+
+  try {
+    cacheResponse = response.clone();
+  } catch {
+    return;
+  }
+
+  void toHttpCacheResponse(cacheResponse)
+    .then(httpCacheResponse => httpCache.put?.(httpCacheRequest, httpCacheResponse))
+    .catch(() => {
+      // Cache population must not alter fetch timing or body stream errors.
+    });
 }
 
 function copyUint8ArrayToArrayBuffer(bytes: Uint8Array): ArrayBuffer {
@@ -527,7 +702,8 @@ function buildHttpResponse(
   const responseHeaders = toHeaders(httpResponse.headers);
   validateResponseHeaders(responseHeaders);
   const upperMethod = method.toUpperCase();
-  const responseBody = upperMethod === 'HEAD'
+  const bodyAllowed = upperMethod !== 'HEAD' && !NULL_BODY_STATUSES.has(httpResponse.statusCode);
+  const responseBody = !bodyAllowed
     ? null
     : (isReadableStreamLike(httpResponse.body)
       ? httpResponse.body
@@ -551,7 +727,10 @@ function buildHttpResponse(
   const response = new Response(responseBody, {
     status: httpResponse.statusCode,
     headers: responseHeaders,
-  }, { signal });
+  }, {
+    immutableHeaders: true,
+    signal,
+  });
   response.type = 'basic';
   response.url = normalizeResponseUrl(resolvedUrl);
   return response;
@@ -592,6 +771,8 @@ function buildDataUrlResponse(resolvedUrl: string, method: string): Response {
     headers: { 'content-type': contentType },
     status: 200,
     statusText: 'OK',
+  }, {
+    immutableHeaders: true,
   });
   response.type = 'basic';
   response.url = normalizeResponseUrl(resolvedUrl);
@@ -614,6 +795,8 @@ function buildBlobUrlResponse(resolvedUrl: string, method: string): Response {
       'content-type': blob.type,
     },
     status: 200,
+  }, {
+    immutableHeaders: true,
   });
   response.type = 'basic';
   response.url = normalizeResponseUrl(resolvedUrl);
@@ -625,6 +808,7 @@ async function runHttpTransport(
   resolvedUrl: string,
   headers: Headers,
   body: null | FetchBodyInit,
+  credentials: Request['credentials'],
   signal?: AbortSignal,
   onCancelReady?: (cancel: () => void) => void,
 ): Promise<Response> {
@@ -635,7 +819,7 @@ async function runHttpTransport(
     bodyForTransport,
     toHeaderRecord(headers),
     {
-      allowUnknownLengthRawStreamFallback: isNeverAbortSignal(signal),
+      credentials,
     },
   );
   onCancelReady?.(() => request.cancel());
@@ -661,7 +845,10 @@ async function runHttpTransport(
 }
 
 function toOpaqueResponse(url: string, type: 'opaque' | 'opaqueredirect'): Response {
-  const response = new Response(null, { status: 0, statusText: '' });
+  const response = new Response(null, { status: 0, statusText: '' }, {
+    allowStatusZero: true,
+    immutableHeaders: true,
+  });
   response.type = type;
   response.url = normalizeResponseUrl(url);
   return response;
@@ -713,9 +900,38 @@ export async function fetch(input: RequestInfo | URL, init?: FetchRequestInit): 
 
   const signal: AbortSignal | undefined = request.signal;
 
+  if (signal?.aborted) {
+    throw normalizeAbortRejectionReason(signal.reason);
+  }
+
+  let httpCacheRequest: null | HttpCacheRequest = null;
+  let cacheRevalidation: null | HttpCacheRevalidation = null;
+
+  const httpCache = getHttpCache();
+
+  if (httpCache) {
+    httpCacheRequest = await buildHttpCacheRequest(request, currentMethod, resolvedUrl, headers, body);
+    const cacheMatch = canReadFromHttpCache(request, currentMethod, body)
+      ? await httpCache.match(httpCacheRequest)
+      : null;
+
+    if (signal?.aborted) {
+      throw normalizeAbortRejectionReason(signal.reason);
+    }
+
+    if (cacheMatch !== null) {
+      if (cacheMatch.kind === 'hit') {
+        return buildCachedResponse(cacheMatch.response, resolvedUrl, currentMethod, signal);
+      }
+
+      cacheRevalidation = cacheMatch;
+      applyHttpCacheRequestHeaders(headers, cacheMatch.headers);
+    }
+  }
+
   const runTransportWithAbort = async (): Promise<Response> => {
     if (!signal) {
-      return runHttpTransport(currentMethod, resolvedUrl, headers, body, signal);
+      return runHttpTransport(currentMethod, resolvedUrl, headers, body, request.credentials, signal);
     }
 
     return await new Promise<Response>((resolve, reject) => {
@@ -749,6 +965,7 @@ export async function fetch(input: RequestInfo | URL, init?: FetchRequestInit): 
         resolvedUrl,
         headers,
         body,
+        request.credentials,
         signal,
         (cancel) => {
           cancelTransport = cancel;
@@ -774,7 +991,19 @@ export async function fetch(input: RequestInfo | URL, init?: FetchRequestInit): 
   };
 
   while (true) {
-    const response = await runTransportWithAbort();
+    let response = await runTransportWithAbort();
+
+    if (response.status === 304 && httpCache?.revalidate && httpCacheRequest && cacheRevalidation) {
+      const revalidatedResponse = await httpCache.revalidate(
+        httpCacheRequest,
+        cacheRevalidation.response,
+        await toHttpCacheResponse(response),
+      );
+
+      if (revalidatedResponse !== null) {
+        response = buildCachedRevalidatedResponse(revalidatedResponse, resolvedUrl, currentMethod, signal);
+      }
+    }
 
     if (response.status === 421 && !retried421 && !(body instanceof ReadableStream)) {
       retried421 = true;
@@ -783,6 +1012,10 @@ export async function fetch(input: RequestInfo | URL, init?: FetchRequestInit): 
     }
 
     if (!isRedirectStatus(response.status)) {
+      if (httpCache !== null && httpCacheRequest !== null) {
+        putResponseInHttpCache(httpCache, request, httpCacheRequest, currentMethod, body, response);
+      }
+
       response.redirected = redirectCount > 0;
       return response;
     }
@@ -791,17 +1024,21 @@ export async function fetch(input: RequestInfo | URL, init?: FetchRequestInit): 
       throw new TypeError('Failed to fetch');
     }
 
-    const locationHeader = response.headers.get('location');
-
-    if (!locationHeader || locationHeader.length === 0) {
-      return response;
-    }
-
-    const nextUrl = resolveRelativeRedirect(locationHeader, resolvedUrl);
-
     if (redirectMode === 'manual') {
       return toOpaqueResponse(resolvedUrl, 'opaqueredirect');
     }
+
+    const locationHeader = response.headers.get('location');
+
+    if (locationHeader === null) {
+      return response;
+    }
+
+    if (locationHeader.length === 0) {
+      throw new TypeError('Failed to fetch');
+    }
+
+    const nextUrl = resolveRelativeRedirect(locationHeader, resolvedUrl);
 
     redirectCount += 1;
 
@@ -809,10 +1046,15 @@ export async function fetch(input: RequestInfo | URL, init?: FetchRequestInit): 
       throw new TypeError('Failed to fetch');
     }
 
+    const previousUrl = resolvedUrl;
     resolvedUrl = nextUrl;
 
     if (isBadPort(resolvedUrl)) {
       throw new TypeError('Failed to fetch');
+    }
+
+    if (isCrossOriginRedirect(previousUrl, resolvedUrl)) {
+      headers.delete('authorization');
     }
 
     const upperCurrentMethod = currentMethod.toUpperCase();

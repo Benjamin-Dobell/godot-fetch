@@ -70,6 +70,16 @@
         "types": "./dist/types/cjs/cookies/index.d.ts"
       }
     },
+    "./caching": {
+      "import": {
+        "default": "./dist/esm/caching/index.js",
+        "types": "./dist/types/esm/caching/index.d.ts"
+      },
+      "require": {
+        "default": "./dist/cjs/caching/index.js",
+        "types": "./dist/types/cjs/caching/index.d.ts"
+      }
+    },
     "./standards": {
       "import": {
         "default": "./dist/esm/standards/index.js",

@@ -1,27 +1,38 @@
+import { Blob } from './blob';
 import { FormData } from './form-data';
 import { URLSearchParams } from './url';
 
-function parseMultipart(contentType: string, bodyText: string, formData: FormData): boolean {
+function getMultipartBoundary(contentType: string): null | string {
   const boundaryMatch = contentType.match(/boundary=([^;]+)/i);
 
   if (!boundaryMatch) {
-    return false;
+    return null;
   }
 
   const boundary = boundaryMatch[1]!.trim().replace(/^"|"$/g, '');
+  return boundary.length > 0 ? boundary : null;
+}
 
-  if (boundary.length === 0) {
+function parseMultipart(contentType: string, bodyText: string, formData: FormData): boolean {
+  const boundary = getMultipartBoundary(contentType);
+  if (boundary === null) {
     return false;
   }
 
   const marker = `--${boundary}`;
   const parts = bodyText.split(marker);
   let appended = false;
+  let sawFinalBoundary = false;
 
   for (const rawPart of parts) {
     const part = rawPart.trim();
 
-    if (part.length === 0 || part === '--') {
+    if (part === '--') {
+      sawFinalBoundary = true;
+      continue;
+    }
+
+    if (part.length === 0) {
       continue;
     }
 
@@ -46,10 +57,20 @@ function parseMultipart(contentType: string, bodyText: string, formData: FormDat
       continue;
     }
 
-    formData.append(nameMatch[1]!, value.replace(/\r?\n$/, ''));
+    const contentTypeLine = headers
+      .split(/\r?\n/)
+      .find((line) => line.toLowerCase().startsWith('content-type:'));
+    const normalizedValue = value.replace(/\r?\n$/, '');
+
+    if (contentTypeLine) {
+      const type = contentTypeLine.slice(contentTypeLine.indexOf(':') + 1).trim().toLowerCase();
+      formData.append(nameMatch[1]!, new Blob([normalizedValue], { type }));
+    } else {
+      formData.append(nameMatch[1]!, normalizedValue);
+    }
     appended = true;
   }
-  return appended;
+  return appended || sawFinalBoundary;
 }
 
 export function parseFormDataFromBody(contentType: null | string, bodyText: string): FormData {
@@ -63,11 +84,7 @@ export function parseFormDataFromBody(contentType: null | string, bodyText: stri
   }
 
   if (normalized.startsWith('multipart/form-data')) {
-    if (bodyText.trim().length === 0) {
-      return formData;
-    }
-
-    if (parseMultipart(normalized, bodyText, formData)) {
+    if (parseMultipart(contentType ?? '', bodyText, formData)) {
       return formData;
     }
   }

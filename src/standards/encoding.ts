@@ -125,6 +125,15 @@ function toPackedBytes(value: BufferSourceLike | PackedByteArray): PackedByteArr
   return new PackedByteArray();
 }
 
+function hasNullByte(value: Uint8Array): boolean {
+  for (let index = 0; index < value.byteLength; index += 1) {
+    if (value[index] === 0) {
+      return true;
+    }
+  }
+  return false;
+}
+
 export class TextEncoder {
   readonly encoding = 'utf-8';
 
@@ -247,7 +256,7 @@ export class TextDecoder {
       const mode = getConformance().utf8Decoding;
       let output: string;
 
-      if (!stream && !this.fatal && mode === 'fast') {
+      if (!stream && !this.fatal && mode === 'fast' && !hasNullByte(combined)) {
         output = toPackedBytes(combined).get_string_from_utf8();
       } else {
         output = decodeUtf8Bytes(combined, this.fatal);
