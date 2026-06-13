@@ -1,4 +1,4 @@
-import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
+import { spawn, spawnSync, type ChildProcess, type SpawnSyncReturns } from 'node:child_process';
 import { lookup } from 'node:dns/promises';
 import { createServer as createNetServer } from 'node:net';
 import process from 'node:process';
@@ -134,7 +134,62 @@ let wptPorts: WptPorts = {
   dns: 0,
 };
 
-function run(command, args, cwd, envOverrides = {}) {
+type RunInvocation = {
+  args: string[];
+  command: string;
+  cwd: string;
+  envOverrides: Record<string, string>;
+  label: string;
+  result: SpawnSyncReturns<string>;
+};
+
+type AsyncRunResult = {
+  error: null | {
+    code?: string;
+    message: string;
+    name: string;
+    stack?: string;
+  };
+  signal: NodeJS.Signals | null;
+  status: number | null;
+  stderr: string;
+  stdout: string;
+};
+
+let currentPhase = 'startup';
+const maxCapturedChildOutputBytes = 1024 * 1024 * 8;
+
+function appendBoundedOutput(current: string, chunk: string): string {
+  const next = current + chunk;
+  if (next.length <= maxCapturedChildOutputBytes) {
+    return next;
+  }
+
+  return next.slice(next.length - maxCapturedChildOutputBytes);
+}
+
+function setPhase(phase: string) {
+  currentPhase = phase;
+  process.stderr.write(`[test:fetch:wpt] phase=${phase}\n`);
+}
+
+process.on('SIGTERM', () => {
+  process.stderr.write(`[test:fetch:wpt] received SIGTERM during phase=${currentPhase}\n`);
+});
+
+process.on('SIGINT', () => {
+  process.stderr.write(`[test:fetch:wpt] received SIGINT during phase=${currentPhase}\n`);
+});
+
+process.on('beforeExit', (code) => {
+  process.stderr.write(`[test:fetch:wpt] beforeExit code=${String(code)} phase=${currentPhase}\n`);
+});
+
+process.on('exit', (code) => {
+  process.stderr.write(`[test:fetch:wpt] exit code=${String(code)} phase=${currentPhase}\n`);
+});
+
+function run(label, command, args, cwd, envOverrides = {}): RunInvocation {
   const result = spawnSync(command, args, {
     cwd,
     encoding: 'utf8',
@@ -147,11 +202,180 @@ function run(command, args, cwd, envOverrides = {}) {
     },
   });
 
-  if (result.error) {
-    throw result.error;
+  return {
+    label,
+    command,
+    args,
+    cwd,
+    envOverrides,
+    result,
+  };
+}
+
+async function runAsync(command, args, cwd, envOverrides = {}): Promise<AsyncRunResult> {
+  return await new Promise<AsyncRunResult>((resolveRun) => {
+    const child = spawn(command, args, {
+      cwd,
+      env: {
+        ...process.env,
+        ...envOverrides,
+        GODOT: godotExecutable,
+        GODOT_FETCH_TLS_CA_CERT_PATH: resolve(wptRepoDir, 'tools/certs/cacert.pem'),
+      },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+
+    let stdout = '';
+    let stderr = '';
+    let settled = false;
+    const startedAt = Date.now();
+    const heartbeat = setInterval(() => {
+      const elapsedSeconds = Math.floor((Date.now() - startedAt) / 1000);
+      process.stderr.write(
+        `[test:fetch:wpt] child-running pid=${String(child.pid ?? 'unknown')} phase=${currentPhase} elapsed_s=${String(elapsedSeconds)}\n`,
+      );
+    }, 30_000);
+
+    const stopHeartbeat = () => {
+      clearInterval(heartbeat);
+    };
+
+    const finish = (result: AsyncRunResult) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      stopHeartbeat();
+      resolveRun(result);
+    };
+
+    process.stderr.write(
+      `[test:fetch:wpt] child-start pid=${String(child.pid ?? 'unknown')} command=${command} args=${JSON.stringify(args)} cwd=${cwd}\n`,
+    );
+    child.stdout?.setEncoding('utf8');
+    child.stderr?.setEncoding('utf8');
+    child.stdout?.on('data', (chunk) => {
+      process.stdout.write(chunk);
+      stdout = appendBoundedOutput(stdout, chunk);
+    });
+    child.stderr?.on('data', (chunk) => {
+      process.stderr.write(chunk);
+      stderr = appendBoundedOutput(stderr, chunk);
+    });
+    child.on('error', (error) => {
+      process.stderr.write(
+        `[test:fetch:wpt] child-error pid=${String(child.pid ?? 'unknown')} name=${error.name} message=${error.message}\n`,
+      );
+      finish({
+        error: {
+          code: 'code' in error ? error.code : undefined,
+          message: error.message,
+          name: error.name,
+          stack: error.stack,
+        },
+        signal: null,
+        status: null,
+        stderr,
+        stdout,
+      });
+    });
+    child.on('close', (status, signal) => {
+      const elapsedSeconds = Math.floor((Date.now() - startedAt) / 1000);
+      process.stderr.write(
+        `[test:fetch:wpt] child-close pid=${String(child.pid ?? 'unknown')} status=${String(status)} signal=${String(signal)} elapsed_s=${String(elapsedSeconds)}\n`,
+      );
+      finish({
+        error: null,
+        signal,
+        status,
+        stderr,
+        stdout,
+      });
+    });
+  });
+}
+
+function writeRunFailure(invocation: RunInvocation) {
+  const { args, command, cwd, label, result } = invocation;
+  const error = result.error;
+  const errorDetails = error
+    ? {
+      code: 'code' in error ? error.code : undefined,
+      message: error.message,
+      name: error.name,
+      stack: error.stack,
+    }
+    : null;
+
+  process.stderr.write(`[test:fetch:wpt] ${label} failed\n`);
+  process.stderr.write(`[test:fetch:wpt] command=${command}\n`);
+  process.stderr.write(`[test:fetch:wpt] args=${JSON.stringify(args)}\n`);
+  process.stderr.write(`[test:fetch:wpt] cwd=${cwd}\n`);
+  process.stderr.write(`[test:fetch:wpt] status=${String(result.status)} signal=${String(result.signal)}\n`);
+
+  if (errorDetails !== null) {
+    process.stderr.write(`[test:fetch:wpt] error=${JSON.stringify(errorDetails)}\n`);
   }
 
-  return result;
+  if (typeof result.stdout === 'string' && result.stdout.length > 0) {
+    process.stderr.write(`[test:fetch:wpt] stdout-begin\n${result.stdout}\n[test:fetch:wpt] stdout-end\n`);
+  }
+
+  if (typeof result.stderr === 'string' && result.stderr.length > 0) {
+    process.stderr.write(`[test:fetch:wpt] stderr-begin\n${result.stderr}\n[test:fetch:wpt] stderr-end\n`);
+  }
+}
+
+function exitOnRunFailure(invocation: RunInvocation): never | void {
+  const { result } = invocation;
+
+  if (!result.error && result.status === 0) {
+    return;
+  }
+
+  writeRunFailure(invocation);
+  process.exit(result.status ?? 1);
+}
+
+function writeTopLevelError(error: unknown) {
+  const details = error && typeof error === 'object'
+    ? {
+      cause: 'cause' in error ? (error as { cause?: unknown }).cause : undefined,
+      code: 'code' in error ? (error as { code?: unknown }).code : undefined,
+      message: 'message' in error ? (error as { message?: unknown }).message : String(error),
+      name: 'name' in error ? (error as { name?: unknown }).name : 'Error',
+      stack: 'stack' in error ? (error as { stack?: unknown }).stack : undefined,
+    }
+    : {
+      cause: undefined,
+      code: undefined,
+      message: String(error),
+      name: 'Error',
+      stack: undefined,
+    };
+
+  process.stderr.write(`[test:fetch:wpt] top-level failure phase=${currentPhase}\n`);
+  process.stderr.write(`[test:fetch:wpt] top-level error=${JSON.stringify(details, null, 2)}\n`);
+}
+
+function writeAsyncRunFailure(label: string, command: string, args: string[], cwd: string, result: AsyncRunResult) {
+  process.stderr.write(`[test:fetch:wpt] ${label} failed\n`);
+  process.stderr.write(`[test:fetch:wpt] command=${command}\n`);
+  process.stderr.write(`[test:fetch:wpt] args=${JSON.stringify(args)}\n`);
+  process.stderr.write(`[test:fetch:wpt] cwd=${cwd}\n`);
+  process.stderr.write(`[test:fetch:wpt] status=${String(result.status)} signal=${String(result.signal)}\n`);
+
+  if (result.error !== null) {
+    process.stderr.write(`[test:fetch:wpt] error=${JSON.stringify(result.error)}\n`);
+  }
+
+  if (result.stdout.length > 0) {
+    process.stderr.write(`[test:fetch:wpt] stdout-begin\n${result.stdout}\n[test:fetch:wpt] stdout-end\n`);
+  }
+
+  if (result.stderr.length > 0) {
+    process.stderr.write(`[test:fetch:wpt] stderr-begin\n${result.stderr}\n[test:fetch:wpt] stderr-end\n`);
+  }
 }
 
 function ensureWptRepo() {
@@ -286,29 +510,25 @@ async function stopWptServer(child: ChildProcess) {
 }
 
 async function main() {
+  setPhase('allocate ports');
   wptPorts = await allocateWptPorts();
-  const build = run('pnpm', ['build'], repoRoot);
-  if (build.status !== 0) {
-    process.stderr.write(build.stdout);
-    process.stderr.write(build.stderr);
-    process.exit(build.status ?? 1);
-  }
-  const demoBuild = run('pnpm', ['build'], demoRoot);
-  if (demoBuild.status !== 0) {
-    process.stderr.write(demoBuild.stdout);
-    process.stderr.write(demoBuild.stderr);
-    process.exit(demoBuild.status ?? 1);
-  }
-  const syncCache = run('pnpm', ['run', 'sync:wpt:cache'], demoRoot);
-  if (syncCache.status !== 0) {
-    process.stderr.write(syncCache.stdout);
-    process.stderr.write(syncCache.stderr);
-    process.exit(syncCache.status ?? 1);
-  }
+  setPhase('repo build');
+  const build = run('repo build', 'pnpm', ['build'], repoRoot);
+  exitOnRunFailure(build);
+  setPhase('demo build');
+  const demoBuild = run('demo build', 'pnpm', ['build'], demoRoot);
+  exitOnRunFailure(demoBuild);
+  setPhase('sync WPT cache');
+  const syncCache = run('WPT cache sync', 'pnpm', ['run', 'sync:wpt:cache'], demoRoot);
+  exitOnRunFailure(syncCache);
+  setPhase('ensure WPT repo');
   ensureWptRepo();
+  setPhase('write WPT serve config');
   writeWptServeConfig();
 
+  setPhase('ensure canonical WPT cache');
   const cachePaths = ensureCanonicalWptCache();
+  setPhase('discover WPT files');
   const selectedFiles = discoverWptFiles(cachePaths.featureCacheDir, requestedFiles);
   const explicitSelectedFiles = requestedFiles.length > 0 ? selectedFiles : [];
   if (selectedFiles.length === 0) {
@@ -344,12 +564,16 @@ async function main() {
     godotArgs.push('--wpt-debug');
   }
 
+  setPhase('verify WPT host resolution');
   await verifyWptHostsResolution();
+  setPhase('start WPT server');
   const wptServer = startWptServer();
-  let runResult;
+  let runResult: AsyncRunResult | null = null;
   try {
+    setPhase('wait for WPT server readiness');
     await waitForWptServerReady();
-    runResult = run(godotExecutable, godotArgs, demoRoot, {
+    setPhase('run Godot host WPT');
+    runResult = await runAsync(godotExecutable, godotArgs, demoRoot, {
       WPT_GODOT_DEBUG: debugMode ? '1' : '0',
       WPT_GODOT_DOMAIN_WWW: wptDomainWww,
       WPT_GODOT_DOMAIN_WWW2: wptDomainWww2,
@@ -365,17 +589,24 @@ async function main() {
       WPT_GODOT_TIMEOUT_MS: String(wptTimeoutMs),
     });
   } finally {
+    setPhase('stop WPT server');
     await stopWptServer(wptServer);
   }
 
+  if (runResult === null) {
+    throw new Error('Host WPT Godot run was not started');
+  }
+
+  setPhase('evaluate Godot run result');
+  if (runResult.error !== null || runResult.status !== 0) {
+    writeAsyncRunFailure('host WPT Godot run', godotExecutable, godotArgs, demoRoot, runResult);
+    process.exit(runResult.status ?? 1);
+  }
+
+  setPhase('parse Godot summary');
   const output = `${runResult.stdout}${runResult.stderr}`;
   const marker = '[WPT_GODOT_JSON]';
   const markerLine = output.split(/\r?\n/).find((line) => line.includes(marker));
-
-  if (runResult.status !== 0) {
-    process.stderr.write(output);
-    process.exit(runResult.status ?? 1);
-  }
 
   if (!markerLine) {
     process.stderr.write(output);
@@ -421,6 +652,7 @@ async function main() {
   if (debugMode) {
     process.stdout.write(output);
   }
+  setPhase('emit host WPT summary');
   process.stdout.write(`${runnerSummaryMarker}${JSON.stringify(summaryPayload)}\n`);
   process.stdout.write(`[test:fetch:wpt] mode=${fetchMode} implementation=${fetchImplementation}\n`);
   process.stdout.write(
@@ -429,6 +661,6 @@ async function main() {
 }
 
 main().catch((error) => {
-  process.stderr.write(`${error instanceof Error ? error.stack ?? error.message : String(error)}\n`);
+  writeTopLevelError(error);
   process.exit(1);
 });

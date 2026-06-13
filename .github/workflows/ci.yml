@@ -138,8 +138,23 @@ jobs:
       - name: WPT Host Conformant
         id: wpt_host_conformant
         run: |
-          set -euo pipefail
-          GODOT_FETCH_MODE=conformant pnpm -C demo run test:fetch:wpt:host | tee /tmp/wpt-host-conformant.log
+          set -uo pipefail
+          echo "[ci][host-wpt] mem-before"
+          free -h || true
+          echo "[ci][host-wpt] proc-before"
+          ps -eo pid,ppid,rss,vsz,comm --sort=-rss | head -n 25 || true
+          host_wpt_exit_code=0
+          GODOT_FETCH_MODE=conformant pnpm -C demo run test:fetch:wpt:host 2>&1 | tee /tmp/wpt-host-conformant.log || host_wpt_exit_code=$?
+          echo "[ci][host-wpt] exit-code=${host_wpt_exit_code}"
+          echo "[ci][host-wpt] mem-after"
+          free -h || true
+          echo "[ci][host-wpt] proc-after"
+          ps -eo pid,ppid,rss,vsz,comm --sort=-rss | head -n 25 || true
+          if [ "${host_wpt_exit_code}" -ne 0 ]; then
+            echo "[ci][host-wpt] non-zero exit; dumping tail"
+            tail -n 200 /tmp/wpt-host-conformant.log || true
+            exit "${host_wpt_exit_code}"
+          fi
           node - <<'NODE'
           const { appendFileSync, readFileSync } = require('node:fs');
 
