@@ -36,8 +36,12 @@ const HttpRequestTimeoutMs = 120_000;
 const HttpHeaderTimeoutMs = HttpRequestTimeoutMs;
 const HttpResponseTimeoutMs = HttpRequestTimeoutMs;
 const HttpWriteChunkSize = 64 * 1024;
+const HttpWriteBatchBudgetBytes = 4 * 1024 * 1024;
+const HttpReadBatchBudgetBytes = 4 * 1024 * 1024;
+const HttpReadRequestChunkBytes = 64 * 1024;
 const StreamingMaxConcurrency = 16;
 const GodotErrorOk = 0; // GError.OK
+const GodotErrorFileEof = 18; // GError.ERR_FILE_EOF
 const InsecureTlsEnv = 'GODOT_FETCH_TLS_UNSAFE';
 const TrustedTlsCertPathEnv = 'GODOT_FETCH_TLS_CA_CERT_PATH';
 const BodyMethodNames = new Set(['POST', 'PUT', 'PATCH']);
@@ -51,6 +55,7 @@ const UserRequestHeadersToDrop = new Set([
 
 let activeStreamingRequests = 0;
 const pendingStreamingAcquires: Array<() => void> = [];
+let activeBufferedRequests = 0;
 
 const cookieRegex = /^(https?):\/\/([^:/]+)(?::\d+)?([^?#]+)/i;
 const urlRegex = /^(https?):\/\/([^:/?#]+)(?::(\d+))?([^?#]*)(\?[^#]*)?/i;
@@ -461,6 +466,7 @@ function pollHttpPeer(peer: StreamPeerTCP | StreamPeerTLS, context: string): voi
   if (pollError !== GodotErrorOk) {
     throw new HttpInternalError(`${context} poll failed with Godot error: ${pollError}`);
   }
+
 }
 
 async function writeHttpRequest(
@@ -476,6 +482,7 @@ async function writeHttpRequest(
   const requestBytes = buildHttpRequest(methodName, parsedUrl, headers, packedBody);
   const requestBuffer = new Uint8Array(requestBytes.to_array_buffer());
   let zeroWriteStartMs: null | number = null;
+  let bytesWrittenSinceYield = 0;
 
   for (let offset = 0; offset < requestBuffer.length; offset += HttpWriteChunkSize) {
     if (cancelled()) {
@@ -527,9 +534,13 @@ async function writeHttpRequest(
 
       zeroWriteStartMs = null;
       chunkOffset += bytesSent;
+      bytesWrittenSinceYield += bytesSent;
       pollHttpPeer(peer, 'HTTP write');
 
-      await yieldHttpTick();
+      if (bytesWrittenSinceYield >= HttpWriteBatchBudgetBytes) {
+        bytesWrittenSinceYield = 0;
+        await yieldHttpTick();
+      }
     }
   }
 }
@@ -541,17 +552,25 @@ function isHttpPeerOpen(peer: StreamPeerTCP | StreamPeerTLS): boolean {
     : status === StreamPeerSocket.Status.STATUS_CONNECTED;
 }
 
-function readAvailableHttpBytes(peer: StreamPeerTCP | StreamPeerTLS): Uint8Array {
+function readAvailableHttpBytes(
+  peer: StreamPeerTCP | StreamPeerTLS,
+  byteCount: number = HttpReadRequestChunkBytes,
+): Uint8Array {
+  pollHttpPeer(peer, 'HTTP response read chunk');
   const available = peer.get_available_bytes();
 
   if (available <= 0) {
     return new Uint8Array(0);
   }
 
-  const result = peer.get_partial_data(available);
+  const bytesToRequest = Math.max(1, Math.min(byteCount, available));
+  const result = peer.get_partial_data(bytesToRequest);
   const readError = result.get(0);
 
-  if (typeof readError !== 'number' || readError !== GodotErrorOk) {
+  if (
+    typeof readError !== 'number'
+    || (readError !== GodotErrorOk && readError !== GodotErrorFileEof)
+  ) {
     throw new HttpInternalError(`HTTP read failed with Godot error: ${String(readError)}`);
   }
 
@@ -564,6 +583,36 @@ function readAvailableHttpBytes(peer: StreamPeerTCP | StreamPeerTLS): Uint8Array
   const readChunkBytes = new Uint8Array(readChunk.size());
   readChunkBytes.set(new Uint8Array(readChunk.to_array_buffer()));
   return readChunkBytes;
+}
+
+function processAvailableHttpChunksUpToBudget(
+  peer: StreamPeerTCP | StreamPeerTLS,
+  onChunk: (chunk: Uint8Array) => boolean | void,
+  byteBudget: number = HttpReadBatchBudgetBytes,
+): number {
+  let totalBytes = 0;
+
+  while (true) {
+    const remainingByteBudget = Math.max(1, byteBudget - totalBytes);
+    const chunk = readAvailableHttpBytes(
+      peer,
+      Math.min(HttpReadRequestChunkBytes, remainingByteBudget),
+    );
+
+    if (chunk.length === 0) {
+      return totalBytes;
+    }
+
+    totalBytes += chunk.length;
+
+    if (onChunk(chunk) === false) {
+      return totalBytes;
+    }
+
+    if (totalBytes >= byteBudget) {
+      return totalBytes;
+    }
+  }
 }
 
 function processChunkedStreamingBodyBytes(
@@ -695,6 +744,7 @@ function createHttpResponseStream(
     start(controller) {
       void (async () => {
         let lastActivityMs = Date.now();
+        let bytesReadSinceYield = 0;
 
         try {
           if (!shouldExpectBody) {
@@ -732,11 +782,8 @@ function createHttpResponseStream(
               throw new HttpAbortError();
             }
 
-            pollHttpPeer(peer, 'HTTP response stream');
-
-            const chunk = readAvailableHttpBytes(peer);
-
-            if (chunk.length > 0) {
+            let responseComplete = false;
+            const bytesRead = processAvailableHttpChunksUpToBudget(peer, (chunk) => {
               lastActivityMs = Date.now();
 
               if (isChunked) {
@@ -747,13 +794,27 @@ function createHttpResponseStream(
                 if (processed.complete) {
                   controller.close();
                   close();
-                  return;
+                  responseComplete = true;
+                  return false;
                 }
-              } else if (enqueuePlainBytes(controller, chunk)) {
-                controller.close();
-                close();
+
                 return;
               }
+
+              if (enqueuePlainBytes(controller, chunk)) {
+                controller.close();
+                close();
+                responseComplete = true;
+                return false;
+              }
+            });
+
+            if (responseComplete) {
+              return;
+            }
+
+            if (bytesRead !== 0) {
+              bytesReadSinceYield += bytesRead;
             }
 
             if (!isHttpPeerOpen(peer)) {
@@ -770,7 +831,19 @@ function createHttpResponseStream(
               throw new HttpInternalError(`HTTP response stream timed out after ${HttpRequestTimeoutMs}ms for ${url}`);
             }
 
-            await yieldHttpTick();
+            if (bytesRead === 0) {
+              bytesReadSinceYield = 0;
+
+              await yieldHttpTick();
+
+              continue;
+            }
+
+            if (bytesReadSinceYield >= HttpReadBatchBudgetBytes) {
+              bytesReadSinceYield = 0;
+
+              await yieldHttpTick();
+            }
           }
         } catch (error) {
           close();
@@ -801,8 +874,8 @@ async function runHttpStreamingRequest(
 
   try {
     await writeHttpRequest(peer, methodName, parsedUrl, url, body, headers, cancelled);
-
     let responseBytes: Uint8Array = new Uint8Array(0);
+    let bytesReadSinceYield = 0;
     const readStartMs = Date.now();
 
     while (true) {
@@ -810,11 +883,12 @@ async function runHttpStreamingRequest(
         throw new HttpAbortError();
       }
 
-      pollHttpPeer(peer, 'HTTP streaming response header');
-      const chunk = readAvailableHttpBytes(peer);
-
-      if (chunk.length > 0) {
+      const bytesRead = processAvailableHttpChunksUpToBudget(peer, (chunk) => {
         responseBytes = appendBytes(responseBytes, chunk);
+      });
+
+      if (bytesRead > 0) {
+        bytesReadSinceYield += bytesRead;
       }
 
       const boundary = findHeaderBoundary(responseBytes);
@@ -874,7 +948,16 @@ async function runHttpStreamingRequest(
         throw new HttpInternalError(`HTTP streaming response timed out waiting for headers after ${HttpHeaderTimeoutMs}ms for ${url}`);
       }
 
-      await yieldHttpTick();
+      if (bytesRead === 0) {
+        bytesReadSinceYield = 0;
+        await yieldHttpTick();
+        continue;
+      }
+
+      if (bytesReadSinceYield >= HttpReadBatchBudgetBytes) {
+        bytesReadSinceYield = 0;
+        await yieldHttpTick();
+      }
     }
   } finally {
     if (!shouldTransferPeerToStream) {
@@ -891,12 +974,14 @@ async function runHttpBufferedRequest(
   cancelled: () => boolean,
 ): Promise<HttpResponse<PackedByteArray>> {
   const parsedUrl = parseRequestUrl(url);
+  activeBufferedRequests += 1;
+
   const { peer, tcp } = await connectHttpPeer(parsedUrl, url, cancelled);
 
   try {
     await writeHttpRequest(peer, methodName, parsedUrl, url, body, headers, cancelled);
-
     let responseBytes: Uint8Array = new Uint8Array(0);
+    let bytesReadSinceYield = 0;
     const readStartMs = Date.now();
     let finalStatus = -1;
     let parsedHeaders: null | HttpHeaders = null;
@@ -908,12 +993,12 @@ async function runHttpBufferedRequest(
         throw new HttpAbortError();
       }
 
-      pollHttpPeer(peer, 'HTTP response read');
-
-      const chunk = readAvailableHttpBytes(peer);
-
-      if (chunk.length > 0) {
+      const bytesRead = processAvailableHttpChunksUpToBudget(peer, (chunk) => {
         responseBytes = appendBytes(responseBytes, chunk);
+      });
+
+      if (bytesRead > 0) {
+        bytesReadSinceYield += bytesRead;
       }
 
       if (parsedHeaders === null) {
@@ -944,6 +1029,7 @@ async function runHttpBufferedRequest(
         if (transferEncoding.includes('chunked')) {
           try {
             const decodedBody = decodeChunkedHttpBodyBytes(bodyBytes);
+
             return {
               statusCode: parsedStatusCode,
               headers: parsedHeaders,
@@ -981,6 +1067,7 @@ async function runHttpBufferedRequest(
 
         if (parsedHeaders !== null) {
           const bodyBytes = responseBytes.subarray(Math.max(0, headerBodyOffset));
+
           return {
             statusCode: parsedStatusCode,
             headers: parsedHeaders,
@@ -993,13 +1080,24 @@ async function runHttpBufferedRequest(
       if (Date.now() - readStartMs > HttpResponseTimeoutMs) {
         throw new HttpInternalError(`HTTP timed out waiting for response after ${HttpResponseTimeoutMs}ms for ${url}`);
       }
-      await yieldHttpTick();
+
+      if (bytesRead === 0) {
+        bytesReadSinceYield = 0;
+        await yieldHttpTick();
+        continue;
+      }
+
+      if (bytesReadSinceYield >= HttpReadBatchBudgetBytes) {
+        bytesReadSinceYield = 0;
+        await yieldHttpTick();
+      }
     }
 
     throw new HttpInternalError(
       `HTTP ended before complete response was received for ${url} (status=${finalStatus}, bytes=${responseBytes.length})`,
     );
   } finally {
+    activeBufferedRequests = Math.max(0, activeBufferedRequests - 1);
     closeHttpPeer(peer, tcp);
   }
 }

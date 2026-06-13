@@ -1,7 +1,7 @@
 {
   "name": "godot-fetch-demo",
   "private": true,
-  "packageManager": "pnpm@10.23.0",
+  "packageManager": "pnpm@11.5.2",
   "dependencies": {
     "@godot-fetch/cookies-sqlite": "workspace:*",
     "godot-fetch": "workspace:*",

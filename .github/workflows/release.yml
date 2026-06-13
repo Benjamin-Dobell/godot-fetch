@@ -58,7 +58,7 @@ jobs:
         if: ${{ steps.detect_changes.outputs.release_needed == 'true' }}
         uses: pnpm/action-setup@v5
         with:
-          version: 10.23.0
+          version: 11.5.2
           run_install: false
 
       - name: Get pnpm store path

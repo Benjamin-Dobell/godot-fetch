@@ -5,7 +5,6 @@ settings:
   excludeLinksFromLockfile: false
 
 overrides:
-  '@breaka/core': workspace:*
   godot-sqlite-kysely: workspace:*
 
 importers:
