@@ -615,6 +615,56 @@ function processAvailableHttpChunksUpToBudget(
   }
 }
 
+function appendAvailableHttpBytesUpToBudget(
+  peer: StreamPeerTCP | StreamPeerTLS,
+  existing: Uint8Array,
+  byteBudget: number = HttpReadBatchBudgetBytes,
+): { bytes: Uint8Array; bytesRead: number } {
+  let totalBytes = 0;
+  const chunks: Uint8Array[] = [];
+
+  while (true) {
+    const remainingByteBudget = Math.max(1, byteBudget - totalBytes);
+    const chunk = readAvailableHttpBytes(
+      peer,
+      Math.min(HttpReadRequestChunkBytes, remainingByteBudget),
+    );
+
+    if (chunk.length === 0) {
+      break;
+    }
+
+    chunks.push(chunk);
+    totalBytes += chunk.length;
+
+    if (totalBytes >= byteBudget) {
+      break;
+    }
+  }
+
+  if (totalBytes === 0) {
+    return { bytes: existing, bytesRead: 0 };
+  }
+
+  if (existing.length === 0 && chunks.length === 1) {
+    return { bytes: chunks[0]!, bytesRead: totalBytes };
+  }
+
+  const merged = new Uint8Array(existing.length + totalBytes);
+  let offset = existing.length;
+  merged.set(existing, 0);
+
+  for (const chunk of chunks) {
+    merged.set(chunk, offset);
+    offset += chunk.length;
+  }
+
+  return {
+    bytes: merged,
+    bytesRead: totalBytes,
+  };
+}
+
 function processChunkedStreamingBodyBytes(
   input: Uint8Array,
   controller: ReadableStreamController,
@@ -883,9 +933,9 @@ async function runHttpStreamingRequest(
         throw new HttpAbortError();
       }
 
-      const bytesRead = processAvailableHttpChunksUpToBudget(peer, (chunk) => {
-        responseBytes = appendBytes(responseBytes, chunk);
-      });
+      const readResult = appendAvailableHttpBytesUpToBudget(peer, responseBytes);
+      const bytesRead = readResult.bytesRead;
+      responseBytes = readResult.bytes;
 
       if (bytesRead > 0) {
         bytesReadSinceYield += bytesRead;
@@ -993,9 +1043,9 @@ async function runHttpBufferedRequest(
         throw new HttpAbortError();
       }
 
-      const bytesRead = processAvailableHttpChunksUpToBudget(peer, (chunk) => {
-        responseBytes = appendBytes(responseBytes, chunk);
-      });
+      const readResult = appendAvailableHttpBytesUpToBudget(peer, responseBytes);
+      const bytesRead = readResult.bytesRead;
+      responseBytes = readResult.bytes;
 
       if (bytesRead > 0) {
         bytesReadSinceYield += bytesRead;
